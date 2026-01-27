@@ -1,0 +1,96 @@
+{
+  "os": "Linux-6.12.53-69.119.amzn2023.x86_64-x86_64-with-glibc2.31",
+  "python": "CPython 3.9.25",
+  "startedAt": "2026-01-27T13:54:12.630034Z",
+  "args": [
+    "train=train_pi3_lowres",
+    "data=tartanair_hospital",
+    "name=pi3_hospital_lowres",
+    "log.use_wandb=true",
+    "log.use_tensorboard=false"
+  ],
+  "program": "/mnt/localssd/Pi3_training/scripts/train_pi3.py",
+  "codePath": "scripts/train_pi3.py",
+  "codePathLocal": "scripts/train_pi3.py",
+  "git": {
+    "remote": "https://github.com/yyfz/Pi3",
+    "commit": "87a0daf9ca4c0f09f8eabaa976f68f078c844eab"
+  },
+  "email": "zhang.zhanghe3z@gmail.com",
+  "root": "/mnt/localssd/Pi3_training",
+  "host": "pluto-prod-zshi-processd-6-1-0",
+  "executable": "/mnt/localssd/miniconda3/envs/py39/bin/python3.9",
+  "cpu_count": 48,
+  "cpu_count_logical": 96,
+  "gpu": "NVIDIA A100-SXM4-80GB",
+  "gpu_count": 8,
+  "disk": {
+    "/": {
+      "total": "80530636800",
+      "used": "1483866112"
+    }
+  },
+  "memory": {
+    "total": "1204531666944"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA A100-SXM4-80GB",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-e473a53e-f9af-5d9f-9dca-131b8a100a4c"
+    },
+    {
+      "name": "NVIDIA A100-SXM4-80GB",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-c58729f0-f367-9a8b-ecb7-4ac702ad6fec"
+    },
+    {
+      "name": "NVIDIA A100-SXM4-80GB",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-250bb121-df3e-0897-8383-725bf32b4e25"
+    },
+    {
+      "name": "NVIDIA A100-SXM4-80GB",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-0853ba47-88df-89f9-99f3-d8950f315119"
+    },
+    {
+      "name": "NVIDIA A100-SXM4-80GB",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-149d58c9-96bd-5d0f-a745-8232306e89f3"
+    },
+    {
+      "name": "NVIDIA A100-SXM4-80GB",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-bbb747d9-58ce-5abf-374b-573648d878f9"
+    },
+    {
+      "name": "NVIDIA A100-SXM4-80GB",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-13411f5f-0daf-b15e-20b5-13a3fed8f032"
+    },
+    {
+      "name": "NVIDIA A100-SXM4-80GB",
+      "memoryTotal": "85899345920",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-b559a6d3-0a1d-2ad1-53b2-bafbcf858a54"
+    }
+  ],
+  "cudaVersion": "13.0",
+  "writerId": "a3ulquz2cuvltad34f7m45cjvhcu4m7c"
+}

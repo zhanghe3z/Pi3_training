@@ -1,0 +1,50 @@
+[2026-01-27 04:44:16,707][base_trainer_accelerate.py][INFO] - ***** Running training *****
+[2026-01-27 04:44:16,707][base_trainer_accelerate.py][INFO] - LR = 0.00005000
+[2026-01-27 04:44:16,708][base_trainer_accelerate.py][INFO] - Weigth Decay = 0.05000000
+[2026-01-27 04:44:16,708][base_trainer_accelerate.py][INFO] - Instantaneous batch size per device = 1
+[2026-01-27 04:44:16,709][base_trainer_accelerate.py][INFO] - Total Batch size = 8
+[2026-01-27 04:44:16,709][base_trainer_accelerate.py][INFO] - Gradient Accumulation steps = 1
+[2026-01-27 04:44:16,709][base_trainer_accelerate.py][INFO] - Number of epochs = 80
+[2026-01-27 04:44:16,709][base_trainer_accelerate.py][INFO] - Number of training steps per epoch = 800
+[2026-01-27 04:44:16,710][base_trainer_accelerate.py][INFO] - Number of total training steps = 64000
+[2026-01-27 04:44:16,710][base_trainer_accelerate.py][INFO] - Number of model parameters = 892.37M
+[2026-01-27 04:44:16,710][base_trainer_accelerate.py][INFO] - Number of model trainable parameters = 588.00M
+[2026-01-27 04:44:16,715][base_trainer_accelerate.py][INFO] - Resuming from checkpoint /mnt/localssd/Pi3_training/outputs/pi3_hospital_lowres/ckpts/checkpoint_29
+[2026-01-27 04:44:16,715][accelerate.accelerator][INFO] - Loading states from /mnt/localssd/Pi3_training/outputs/pi3_hospital_lowres/ckpts/checkpoint_29
+[2026-01-27 04:44:18,854][accelerate.checkpointing][INFO] - All model weights loaded successfully
+[2026-01-27 04:44:21,815][accelerate.checkpointing][INFO] - All optimizer states loaded successfully
+[2026-01-27 04:44:21,817][accelerate.checkpointing][INFO] - All scheduler states loaded successfully
+[2026-01-27 04:44:21,817][accelerate.checkpointing][INFO] - All dataloader sampler states loaded successfully
+[2026-01-27 04:44:21,821][accelerate.checkpointing][INFO] - All random states loaded successfully
+[2026-01-27 04:44:21,824][accelerate.accelerator][INFO] - Loading in 0 custom states
+[2026-01-27 04:44:24,263][base_trainer_accelerate.py][INFO] - Start training epoch 29, 800 iters per inner epoch. Training dtype bf16
+[2026-01-27 04:44:42,998][utils.dist][INFO] - [rank: 0] Epoch: [29]  [     0/625000]  eta: 135 days, 12:15:52  lr: 0.000034  min_lr: 0.000003  loss: 0.0255 (0.0255)  local_pts_loss: 0.0172 (0.0172)  normal_loss: 0.0000 (0.0000)  trans_loss: 0.0006 (0.0006)  rot_loss: 0.0196 (0.0196)  weight_decay: 0.0500 (0.0500)  grad_norm: 0.7788 (0.7788)  time: 18.7330  data: 8.4557  max mem: 21150
+[2026-01-27 04:45:44,651][utils.dist][INFO] - [rank: 0] Epoch: [29]  [    40/625000]  eta: 14 days, 4:20:52  lr: 0.000034  min_lr: 0.000003  loss: 0.0183 (0.0259)  local_pts_loss: 0.0133 (0.0154)  normal_loss: 0.0000 (0.0000)  trans_loss: 0.0003 (0.0009)  rot_loss: 0.0138 (0.0179)  weight_decay: 0.0500 (0.0500)  grad_norm: 0.3573 (0.5346)  time: 1.4998  data: 0.0004  max mem: 25270
+[2026-01-27 04:46:45,274][utils.dist][INFO] - [rank: 0] Epoch: [29]  [    80/625000]  eta: 12 days, 14:10:19  lr: 0.000034  min_lr: 0.000003  loss: 0.0157 (0.0215)  local_pts_loss: 0.0125 (0.0139)  normal_loss: 0.0000 (0.0000)  trans_loss: 0.0002 (0.0006)  rot_loss: 0.0126 (0.0158)  weight_decay: 0.0500 (0.0500)  grad_norm: 0.3510 (0.4923)  time: 1.5172  data: 0.0004  max mem: 25271
+[2026-01-27 04:47:46,434][utils.dist][INFO] - [rank: 0] Epoch: [29]  [   120/625000]  eta: 12 days, 1:59:48  lr: 0.000034  min_lr: 0.000003  loss: 0.0183 (0.0202)  local_pts_loss: 0.0123 (0.0134)  normal_loss: 0.0000 (0.0000)  trans_loss: 0.0005 (0.0005)  rot_loss: 0.0119 (0.0149)  weight_decay: 0.0500 (0.0500)  grad_norm: 0.4522 (0.4759)  time: 1.5002  data: 0.0004  max mem: 25273
+[2026-01-27 04:48:47,555][utils.dist][INFO] - [rank: 0] Epoch: [29]  [   160/625000]  eta: 11 days, 19:49:13  lr: 0.000033  min_lr: 0.000003  loss: 0.0168 (0.0202)  local_pts_loss: 0.0134 (0.0136)  normal_loss: 0.0000 (0.0000)  trans_loss: 0.0002 (0.0005)  rot_loss: 0.0095 (0.0146)  weight_decay: 0.0500 (0.0500)  grad_norm: 0.3568 (0.4707)  time: 1.5422  data: 0.0004  max mem: 25277
+[2026-01-27 04:49:47,937][utils.dist][INFO] - [rank: 0] Epoch: [29]  [   200/625000]  eta: 11 days, 15:27:27  lr: 0.000033  min_lr: 0.000003  loss: 0.0196 (0.0200)  local_pts_loss: 0.0132 (0.0135)  normal_loss: 0.0000 (0.0000)  trans_loss: 0.0005 (0.0005)  rot_loss: 0.0146 (0.0145)  weight_decay: 0.0500 (0.0500)  grad_norm: 0.5792 (0.4812)  time: 1.5091  data: 0.0004  max mem: 25277
+[2026-01-27 04:50:49,097][utils.dist][INFO] - [rank: 0] Epoch: [29]  [   240/625000]  eta: 11 days, 13:05:52  lr: 0.000033  min_lr: 0.000003  loss: 0.0179 (0.0202)  local_pts_loss: 0.0130 (0.0135)  normal_loss: 0.0000 (0.0000)  trans_loss: 0.0003 (0.0005)  rot_loss: 0.0145 (0.0146)  weight_decay: 0.0500 (0.0500)  grad_norm: 0.4353 (0.4922)  time: 1.5403  data: 0.0004  max mem: 25277
+[2026-01-27 04:51:51,391][utils.dist][INFO] - [rank: 0] Epoch: [29]  [   280/625000]  eta: 11 days, 12:06:17  lr: 0.000033  min_lr: 0.000003  loss: 0.0135 (0.0195)  local_pts_loss: 0.0114 (0.0133)  normal_loss: 0.0000 (0.0000)  trans_loss: 0.0001 (0.0005)  rot_loss: 0.0106 (0.0142)  weight_decay: 0.0500 (0.0500)  grad_norm: 0.2951 (0.4736)  time: 1.5816  data: 0.0004  max mem: 25277
+[2026-01-27 04:52:21,211][base_trainer_accelerate.py][INFO] - Error in depth visualization: Can't call numpy() on Tensor that requires grad. Use tensor.detach().numpy() instead.
+[2026-01-27 04:52:21,212][base_trainer_accelerate.py][INFO] - Traceback (most recent call last):
+  File "/mnt/localssd/Pi3_training/./trainers/pi3_trainer.py", line 177, in log_depth_visualizations
+    fig = self.create_depth_visualization(rgb, depth_gt, depth_p)
+  File "/mnt/localssd/Pi3_training/./trainers/pi3_trainer.py", line 138, in create_depth_visualization
+    depth_pred = depth_pred.cpu().numpy()
+RuntimeError: Can't call numpy() on Tensor that requires grad. Use tensor.detach().numpy() instead.
+Traceback (most recent call last):
+  File "/mnt/localssd/Pi3_training/scripts/train_pi3.py", line 13, in <module>
+    main()
+  File "/mnt/localssd/miniconda3/envs/py39/lib/python3.9/site-packages/hydra/main.py", line 94, in decorated_main
+    _run_hydra(
+  File "/mnt/localssd/miniconda3/envs/py39/lib/python3.9/site-packages/hydra/_internal/utils.py", line 394, in _run_hydra
+    _run_app(
+  File "/mnt/localssd/miniconda3/envs/py39/lib/python3.9/site-packages/hydra/_internal/utils.py", line 457, in _run_app
+    run_and_report(
+  File "/mnt/localssd/miniconda3/envs/py39/lib/python3.9/site-packages/hydra/_internal/utils.py", line 220, in run_and_report
+    return func()
+  File "/mnt/localssd/miniconda3/envs/py39/lib/python3.9/site-packages/hydra/_internal/utils.py", line 458, in <lambda>
+    lambda: hydra.run(
+  File "/mnt/localssd/miniconda3/envs/py39/lib/python3.9/site-packages/hydra/_internal/hydra.py", line 119, in run
+    ret = run_job(

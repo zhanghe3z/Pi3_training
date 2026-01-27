@@ -1,0 +1,47 @@
+# @package _global_
+
+train_dataset:
+    length: 10000000         # dummy
+
+    weights:
+        TarTanAir: 10000
+
+    TarTanAir:
+        _target_: datasets.tartanair_hospital_dataset.TarTanAirHospitalDataset
+        data_root: /mnt/localssd/tartanair_tools/tartanair_data/hospital
+        filter_sequences:
+            - ['Easy', 'P000']
+        z_far: 80
+        frame_num: 3
+        aug_crop: 16
+        transform:
+            _partial_: true
+            _target_: datasets.base.transforms.JitterJpegLossBlurring
+        aug_focal: 0.9
+        mode: 'train'
+
+train_dataloader:
+    drop_last: True
+    shuffle: True
+
+test_dataset:
+    weights:
+        TarTanAir: 1000
+
+    TarTanAir:
+        _target_: datasets.tartanair_hospital_dataset.TarTanAirHospitalDataset
+        data_root: /mnt/localssd/tartanair_tools/tartanair_data/hospital
+        filter_sequences:
+            - ['Easy', 'P000']
+        z_far: 80
+        frame_num: 3
+        resolution:
+            - [518, 336]
+        transform:
+            _partial_: true
+            _target_: datasets.base.transforms.ImgToTensor
+        mode: 'test'
+
+test_dataloader:
+    drop_last: False
+    shuffle: False

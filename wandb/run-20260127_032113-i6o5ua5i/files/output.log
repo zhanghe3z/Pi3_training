@@ -1,0 +1,22 @@
+[2026-01-27 03:21:14,513][base_trainer_accelerate.py][INFO] - ***** Running training *****
+[2026-01-27 03:21:14,514][base_trainer_accelerate.py][INFO] - LR = 0.00005000
+[2026-01-27 03:21:14,515][base_trainer_accelerate.py][INFO] - Weigth Decay = 0.05000000
+[2026-01-27 03:21:14,515][base_trainer_accelerate.py][INFO] - Instantaneous batch size per device = 1
+[2026-01-27 03:21:14,515][base_trainer_accelerate.py][INFO] - Total Batch size = 8
+[2026-01-27 03:21:14,516][base_trainer_accelerate.py][INFO] - Gradient Accumulation steps = 1
+[2026-01-27 03:21:14,516][base_trainer_accelerate.py][INFO] - Number of epochs = 80
+[2026-01-27 03:21:14,516][base_trainer_accelerate.py][INFO] - Number of training steps per epoch = 800
+[2026-01-27 03:21:14,516][base_trainer_accelerate.py][INFO] - Number of total training steps = 64000
+[2026-01-27 03:21:14,517][base_trainer_accelerate.py][INFO] - Number of model parameters = 892.37M
+[2026-01-27 03:21:14,517][base_trainer_accelerate.py][INFO] - Number of model trainable parameters = 588.00M
+[2026-01-27 03:21:14,522][base_trainer_accelerate.py][INFO] - Resuming from checkpoint /mnt/localssd/Pi3_training/outputs/pi3_hospital_lowres/ckpts/checkpoint_29
+[2026-01-27 03:21:14,522][accelerate.accelerator][INFO] - Loading states from /mnt/localssd/Pi3_training/outputs/pi3_hospital_lowres/ckpts/checkpoint_29
+[2026-01-27 03:21:17,428][accelerate.checkpointing][INFO] - All model weights loaded successfully
+[2026-01-27 03:21:20,969][accelerate.checkpointing][INFO] - All optimizer states loaded successfully
+[2026-01-27 03:21:20,970][accelerate.checkpointing][INFO] - All scheduler states loaded successfully
+[2026-01-27 03:21:20,970][accelerate.checkpointing][INFO] - All dataloader sampler states loaded successfully
+[2026-01-27 03:21:20,973][accelerate.checkpointing][INFO] - All random states loaded successfully
+[2026-01-27 03:21:20,977][accelerate.accelerator][INFO] - Loading in 0 custom states
+[2026-01-27 03:21:21,049][base_trainer_accelerate.py][INFO] - Start training epoch 29, 800 iters per inner epoch. Training dtype bf16
+[2026-01-27 03:21:39,324][utils.dist][INFO] - [rank: 0] Epoch: [29]  [     0/625000]  eta: 132 days, 4:25:53  lr: 0.000035  min_lr: 0.000003  loss: 0.0204 (0.0204)  local_pts_loss: 0.0178 (0.0178)  normal_loss: 0.0000 (0.0000)  trans_loss: 0.0001 (0.0001)  rot_loss: 0.0136 (0.0136)  weight_decay: 0.0500 (0.0500)  grad_norm: 0.1993 (0.1993)  time: 18.2732  data: 13.4127  max mem: 21150
+Traceback (most recent call last):

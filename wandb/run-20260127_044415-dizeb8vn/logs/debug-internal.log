@@ -1,0 +1,9 @@
+{"time":"2026-01-27T04:44:16.158595974-08:00","level":"INFO","msg":"stream: starting","core version":"0.24.0"}
+{"time":"2026-01-27T04:44:16.37684766-08:00","level":"INFO","msg":"stream: created new stream","id":"dizeb8vn"}
+{"time":"2026-01-27T04:44:16.376969795-08:00","level":"INFO","msg":"handler: started","stream_id":"dizeb8vn"}
+{"time":"2026-01-27T04:44:16.377121073-08:00","level":"INFO","msg":"stream: started","id":"dizeb8vn"}
+{"time":"2026-01-27T04:44:16.377138179-08:00","level":"INFO","msg":"writer: started","stream_id":"dizeb8vn"}
+{"time":"2026-01-27T04:44:16.377147649-08:00","level":"INFO","msg":"sender: started","stream_id":"dizeb8vn"}
+{"time":"2026-01-27T04:52:44.331066184-08:00","level":"INFO","msg":"flowcontrol: backed up, offloading to disk","recordNumber":1079}
+{"time":"2026-01-27T04:52:44.361695456-08:00","level":"ERROR","msg":"flowcontrol: failed reading after 0 records: transactionlog: bad header: leveldb/record: reader not in first block","chunk":{"InitialOffset":297315,"InitialNumber":1079,"Count":18}}
+{"time":"2026-01-27T04:52:44.362417282-08:00","level":"INFO","msg":"flowcontrol: unblocked","totalOffloaded":18}
