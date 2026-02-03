@@ -1,9 +1,8 @@
 #!/bin/bash
 
-# Pi3 Ablation Study Training Script
-# This script trains the Pi3 model with ablation:
+# Pi3 Training Script with Transformer Decoder + Simple Loss
+# - Transformer decoder: ENABLED
 # - Simple L1 Loss (no scale-invariant alignment)
-# - Transformer decoder is ENABLED (restored)
 
 set -e  # Exit on error
 
@@ -13,15 +12,15 @@ NUM_MACHINES=1
 DATA_CONFIG="tartanair_hospital"
 
 # Output directory
-OUTPUT_DIR="outputs/pi3_hospital_ablation"
+OUTPUT_DIR="outputs/pi3_hospital_decoder_simpleloss"
 mkdir -p ${OUTPUT_DIR}
 
 echo "=========================================="
-echo "Pi3 ABLATION STUDY Training"
+echo "Pi3 Training: Decoder + Simple Loss"
 echo "=========================================="
-echo "Ablation:"
-echo "  - Simple L1 Loss (no scale-invariant alignment)"
+echo "Configuration:"
 echo "  - Transformer decoder: ENABLED"
+echo "  - Simple L1 Loss"
 echo "=========================================="
 echo "Number of GPUs: ${NUM_GPUS}"
 echo "Data Config: ${DATA_CONFIG}"
@@ -30,11 +29,9 @@ echo "=========================================="
 
 # Stage 1: Low-Resolution Training (224x224)
 echo ""
-echo "[Stage 1/3] Starting Low-Resolution Training (ABLATION)..."
+echo "[Stage 1/2] Starting Low-Resolution Training..."
 echo "Resolution: 224x224"
 echo "Epochs: 80"
-echo "Depth Visualization: Every 200 steps"
-echo "Number of Samples: 2"
 echo ""
 
 accelerate launch --config_file configs/accelerate/ddp.yaml \
@@ -46,7 +43,7 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
     model=pi3 \
     loss.train_loss._target_=pi3.models.loss_ablation.Pi3LossAblation \
     loss.test_loss._target_=pi3.models.loss_ablation.Pi3LossAblation \
-    name=pi3_hospital_lowres_ablation \
+    name=pi3_hospital_lowres_decoder_simpleloss \
     log.use_wandb=true \
     log.use_tensorboard=false \
     viz_interval=200 \
@@ -55,7 +52,7 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
 # Check if Stage 1 completed successfully
 if [ $? -eq 0 ]; then
     echo ""
-    echo "[Stage 1/3] Low-Resolution Training Completed Successfully!"
+    echo "[Stage 1/2] Low-Resolution Training Completed Successfully!"
     echo ""
 else
     echo ""
@@ -64,7 +61,7 @@ else
 fi
 
 # Find the latest checkpoint from Stage 1
-LOWRES_CKPT=$(find outputs/pi3_hospital_lowres_ablation/ckpts -name "*.pth" | sort -V | tail -n 1)
+LOWRES_CKPT=$(find outputs/pi3_hospital_lowres_decoder_simpleloss/ckpts -name "*.pth" | sort -V | tail -n 1)
 
 if [ -z "${LOWRES_CKPT}" ]; then
     echo "[ERROR] No checkpoint found from Stage 1. Cannot proceed to Stage 2."
@@ -75,11 +72,9 @@ echo "Found Stage 1 checkpoint: ${LOWRES_CKPT}"
 echo ""
 
 # Stage 2: High-Resolution Training
-echo "[Stage 2/3] Starting High-Resolution Training (ABLATION)..."
+echo "[Stage 2/2] Starting High-Resolution Training..."
 echo "Loading checkpoint: ${LOWRES_CKPT}"
 echo "Epochs: 40"
-echo "Depth Visualization: Every 200 steps"
-echo "Number of Samples: 4"
 echo ""
 
 accelerate launch --config_file configs/accelerate/ddp.yaml \
@@ -91,7 +86,7 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
     model=pi3 \
     loss.train_loss._target_=pi3.models.loss_ablation.Pi3LossAblation \
     loss.test_loss._target_=pi3.models.loss_ablation.Pi3LossAblation \
-    name=pi3_hospital_highres_ablation \
+    name=pi3_hospital_highres_decoder_simpleloss \
     model.ckpt=${LOWRES_CKPT} \
     log.use_wandb=true \
     log.use_tensorboard=false \
@@ -101,7 +96,7 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
 # Check if Stage 2 completed successfully
 if [ $? -eq 0 ]; then
     echo ""
-    echo "[Stage 2/3] High-Resolution Training Completed Successfully!"
+    echo "[Stage 2/2] High-Resolution Training Completed Successfully!"
     echo ""
 else
     echo ""
@@ -110,7 +105,7 @@ else
 fi
 
 # Find the latest checkpoint from Stage 2
-HIGHRES_CKPT=$(find outputs/pi3_hospital_highres_ablation/ckpts -name "*.pth" | sort -V | tail -n 1)
+HIGHRES_CKPT=$(find outputs/pi3_hospital_highres_decoder_simpleloss/ckpts -name "*.pth" | sort -V | tail -n 1)
 
 if [ -z "${HIGHRES_CKPT}" ]; then
     echo "[ERROR] No checkpoint found from Stage 2."
@@ -122,18 +117,13 @@ echo ""
 
 echo ""
 echo "=========================================="
-echo "ABLATION Training Complete!"
+echo "Training Complete!"
 echo "=========================================="
-echo "Ablation Applied:"
-echo "  - Simple L1 Loss (no scale-invariant alignment)"
+echo "Configuration:"
 echo "  - Transformer decoder: ENABLED"
+echo "  - Simple L1 Loss"
 echo "=========================================="
 echo "Checkpoints are saved in:"
-echo "  - Stage 1: outputs/pi3_hospital_lowres_ablation/ckpts/"
-echo "  - Stage 2: outputs/pi3_hospital_highres_ablation/ckpts/"
-echo "=========================================="
-echo ""
-echo "To compare with baseline:"
-echo "  Baseline: outputs/pi3_hospital_lowres/ckpts/"
-echo "  Ablation: outputs/pi3_hospital_lowres_ablation/ckpts/"
+echo "  - Stage 1: outputs/pi3_hospital_lowres_decoder_simpleloss/ckpts/"
+echo "  - Stage 2: outputs/pi3_hospital_highres_decoder_simpleloss/ckpts/"
 echo "=========================================="
