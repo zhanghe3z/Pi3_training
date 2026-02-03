@@ -1,73 +1,44 @@
 #!/usr/bin/env python3
 """
-Visualize depth predictions from Pi3 pretrained model on TartanAir Hospital dataset.
+Visualize depth predictions from Pi3 model with DINO-only initialization (no checkpoint).
 """
 import sys
-import os
-
-# Get the directory of this script
-script_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, script_dir)
+sys.path.append('.')
 
 import torch
 import numpy as np
 import argparse
 from pathlib import Path
-import matplotlib
-matplotlib.use('Agg')
+from pi3.models.pi3_training import Pi3
+from datasets.tartanair_hospital_dataset import TarTanAirHospitalDataset
+from datasets.base.transforms import ImgToTensor
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-# Import from Pi3_training datasets first (before Pi3)
-import datasets.tartanair_hospital_dataset
-from datasets.tartanair_hospital_dataset import TarTanAirHospitalDataset
-from datasets.base.transforms import ImgToTensor
+def compute_depth_scale(depth_pred, depth_gt, valid_mask=None):
+    """Compute optimal scale to align predicted depth with ground truth."""
+    if isinstance(depth_pred, torch.Tensor):
+        depth_pred = depth_pred.cpu().numpy()
+    if isinstance(depth_gt, torch.Tensor):
+        depth_gt = depth_gt.cpu().numpy()
 
-# Add Pi3 eval code path for pretrained model
-sys.path.insert(0, '/mnt/localssd/Pi3')
-from pi3.models.pi3 import Pi3
-
-def align_depth_median_scale(depth_pred, depth_gt):
-    """
-    Align predicted depth to ground truth depth using median and scale alignment.
-
-    Args:
-        depth_pred: Predicted depth map (numpy array)
-        depth_gt: Ground truth depth map (numpy array)
-
-    Returns:
-        Aligned predicted depth map
-    """
-    # Get valid masks (where GT depth is positive)
-    valid_mask = depth_gt > 0
+    if valid_mask is None:
+        valid_mask = (depth_gt > 0) & (depth_pred > 0)
 
     if not valid_mask.any():
-        return depth_pred
+        return 1.0
 
-    # Get valid depths
+    # Compute scale using least squares: scale = sum(gt * pred) / sum(pred^2)
     pred_valid = depth_pred[valid_mask]
     gt_valid = depth_gt[valid_mask]
+    scale = np.sum(gt_valid * pred_valid) / (np.sum(pred_valid * pred_valid) + 1e-8)
 
-    # Compute medians
-    pred_median = np.median(pred_valid)
-    gt_median = np.median(gt_valid)
+    return scale
 
-    # Compute scale factor using least squares
-    # We want to find s such that: pred * s ≈ gt
-    # Solution: s = (pred · gt) / (pred · pred)
-    scale = np.sum(pred_valid * gt_valid) / (np.sum(pred_valid * pred_valid) + 1e-8)
-
-    # Alternative: simple median ratio (uncomment to use this instead)
-    # scale = gt_median / (pred_median + 1e-8)
-
-    # Apply scale
-    depth_pred_aligned = depth_pred * scale
-
-    return depth_pred_aligned
-
-def save_comparison(rgb, depth_gt, depth_pred, save_path):
-    """Save side-by-side comparison of RGB, GT depth, and predicted depth."""
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+def save_comparison(rgb, depth_gt, depth_pred, save_path, depth_pred_scaled=None):
+    """Save side-by-side comparison of RGB, GT depth, predicted depth, and scaled predicted depth."""
+    num_cols = 4 if depth_pred_scaled is not None else 3
+    fig, axes = plt.subplots(1, num_cols, figsize=(6*num_cols, 6))
 
     # RGB
     if isinstance(rgb, torch.Tensor):
@@ -92,59 +63,69 @@ def save_comparison(rgb, depth_gt, depth_pred, save_path):
     axes[1].axis('off')
     plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 
-    # Predicted Depth (aligned)
+    # Predicted Depth (unscaled)
     if isinstance(depth_pred, torch.Tensor):
         depth_pred = depth_pred.cpu().numpy()
+    pred_valid = depth_pred > 0
+    pred_vmin = depth_pred[pred_valid].min() if pred_valid.any() else 0
+    pred_vmax = depth_pred[pred_valid].max() if pred_valid.any() else 1
 
-    # Align predicted depth to GT using median and scale
-    depth_pred_aligned = align_depth_median_scale(depth_pred, depth_gt)
-
-    im2 = axes[2].imshow(depth_pred_aligned, cmap='turbo', vmin=vmin, vmax=vmax)
-    axes[2].set_title('Predicted Depth (Aligned)')
+    im2 = axes[2].imshow(depth_pred, cmap='turbo', vmin=pred_vmin, vmax=pred_vmax)
+    axes[2].set_title(f'Predicted Depth (unscaled)\nRange: [{pred_vmin:.2f}, {pred_vmax:.2f}]')
     axes[2].axis('off')
     plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+
+    # Scaled Predicted Depth
+    if depth_pred_scaled is not None:
+        if isinstance(depth_pred_scaled, torch.Tensor):
+            depth_pred_scaled = depth_pred_scaled.cpu().numpy()
+        im3 = axes[3].imshow(depth_pred_scaled, cmap='turbo', vmin=vmin, vmax=vmax)
+        axes[3].set_title('Predicted Depth (scaled)')
+        axes[3].axis('off')
+        plt.colorbar(im3, ax=axes[3], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize depth predictions from Pi3 pretrained model")
-    parser.add_argument("--model_name", type=str,
-                       default='yyfz233/Pi3',
-                       help="HuggingFace model name or local path")
+    parser = argparse.ArgumentParser(description="Visualize depth predictions from DINO-only initialized Pi3 model")
     parser.add_argument("--data_root", type=str,
                        default='/mnt/localssd/tartanair_tools/tartanair_data/hospital',
                        help="Path to TartanAir hospital data")
     parser.add_argument("--output_dir", type=str,
-                       default='/mnt/localssd/Pi3_training/outputs/pretrained_visualizations',
+                       default='/mnt/localssd/Pi3_training/outputs/dino_only_init',
                        help="Directory to save visualizations")
-    parser.add_argument("--num_samples", type=int, default=5,
+    parser.add_argument("--num_samples", type=int, default=3,
                        help="Number of samples to visualize")
     parser.add_argument("--device", type=str, default='cuda:0',
                        help="Device to run inference on")
     parser.add_argument("--frame_num", type=int, default=8,
                        help="Number of frames to use for inference")
+    parser.add_argument("--scale_depth", action='store_true', default=True,
+                       help="Scale predicted depth to match ground truth range")
 
     args = parser.parse_args()
 
     # Create output directory
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) / "depth_visualizations"
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
 
-    # Load pretrained model
-    print(f"Loading pretrained Pi3 model from {args.model_name}...")
+    # Load model with DINO-only initialization (no checkpoint)
     device = torch.device(args.device)
-
-    try:
-        model = Pi3.from_pretrained(args.model_name).to(device).eval()
-        print("Pretrained model loaded successfully!")
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        print("Trying to download from HuggingFace...")
-        model = Pi3.from_pretrained(args.model_name, force_download=True).to(device).eval()
-        print("Model downloaded and loaded successfully!")
+    print("Creating Pi3 model with DINO-only initialization (no pretrained checkpoint)...")
+    model = Pi3(
+        pos_type='rope100',
+        decoder_size='large',
+        load_vggt=False,  # DINO only, no VGGT
+        freeze_encoder=False,
+        use_global_points=False,
+        train_conf=False,
+        num_dec_blk_not_to_checkpoint=4,
+        ckpt=None  # No checkpoint - fresh DINO initialization
+    ).to(device).eval()
+    print("Model created successfully with DINO-only initialization!")
 
     # Load dataset
     print(f"Loading dataset from {args.data_root}...")
@@ -163,7 +144,9 @@ def main():
     dtype = torch.bfloat16 if torch.cuda.get_device_capability(device)[0] >= 8 else torch.float16
     num_samples = min(args.num_samples, len(dataset))
 
-    print(f"\nVisualizing {num_samples} samples with pretrained model...")
+    print(f"\nVisualizing {num_samples} samples with DINO-only initialized model...")
+    all_scales = []  # Track scales for statistics
+
     for idx in tqdm(range(num_samples)):
         views = dataset[idx]  # dataset returns views list directly
 
@@ -187,13 +170,28 @@ def main():
             depth_gt = view['depthmap']
             depth_p = depth_pred[view_idx].numpy()
 
+            # Compute depth scale if requested
+            depth_p_scaled = None
+            if args.scale_depth:
+                scale = compute_depth_scale(depth_p, depth_gt)
+                all_scales.append(scale)
+                depth_p_scaled = depth_p * scale
+
             # Save comparison
-            save_name = f"pretrained_sample_{idx:03d}_view_{view_idx:02d}_{scene_label}_instance_{view['instance']}.png"
+            save_name = f"dino_only_sample_{idx:03d}_view_{view_idx:02d}_{scene_label}_instance_{view['instance']}.png"
             save_path = output_dir / save_name
-            save_comparison(rgb, depth_gt, depth_p, save_path)
+            save_comparison(rgb, depth_gt, depth_p, save_path, depth_p_scaled)
 
     print(f"\nVisualization complete! Images saved to: {output_dir}")
     print(f"Total images generated: {num_samples * args.frame_num}")
+
+    if args.scale_depth and all_scales:
+        print(f"\nDepth scaling statistics:")
+        print(f"  Mean scale: {np.mean(all_scales):.4f}")
+        print(f"  Median scale: {np.median(all_scales):.4f}")
+        print(f"  Std scale: {np.std(all_scales):.4f}")
+        print(f"  Min scale: {np.min(all_scales):.4f}")
+        print(f"  Max scale: {np.max(all_scales):.4f}")
 
 if __name__ == '__main__':
     main()

@@ -65,7 +65,7 @@ class LinearPts3d (nn.Module):
         super().__init__()
         self.patch_size = patch_size
 
-        self.proj = nn.Linear(dec_embed_dim, (output_dim)*self.patch_size**2)
+        self.proj = nn.Linear(dec_embed_dim, (output_dim)*self.patch_size**2, bias=False)
 
     def forward(self, decout, img_shape):
         H, W = img_shape

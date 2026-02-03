@@ -104,6 +104,8 @@ class BaseTrainer:
         # Create the LR scheduler
         self.iters_per_epoch = self.cfg.train.iters_per_epoch if self.cfg.train.iters_per_epoch > 0 else len(self.train_loader)
         self.iters_per_test = self.cfg.test.iters_per_test if self.cfg.test.iters_per_test > 0 else len(self.test_loader)
+
+        # Create scheduler with total_steps (will be adjusted after resume if needed)
         self.cfg.train.lr_scheduler.total_steps = self.cfg.train.num_epoch * self.iters_per_epoch
         self.log_info(f"Total step for lr scheduler: {self.cfg.train.lr_scheduler.total_steps} ({self.cfg.train.num_epoch} * {self.iters_per_epoch})")
         self.lr_scheduler = build_scheduler(
@@ -183,6 +185,29 @@ class BaseTrainer:
         latest_epoch = self.auto_resume()
         self.initial_global_step = self.iters_per_epoch * latest_epoch
         self.first_epoch = latest_epoch
+
+        # If resuming from checkpoint, fast-forward the scheduler (unless reset_scheduler_on_resume is True)
+        reset_scheduler = self.cfg.train.get('reset_scheduler_on_resume', False)
+        if latest_epoch > 0 and not reset_scheduler:
+            steps_to_skip = latest_epoch * self.iters_per_epoch
+            self.log_info(f"Fast-forwarding scheduler by {steps_to_skip} steps (epoch {latest_epoch})")
+            for _ in range(steps_to_skip):
+                self.lr_scheduler.step()
+            # Log current learning rate after fast-forward
+            current_lr = self.optimizer.param_groups[0]['lr']
+            self.log_info(f"Current learning rate after resume: {current_lr:.8f}")
+        elif latest_epoch > 0 and reset_scheduler:
+            # Reset scheduler: recreate it for the remaining epochs
+            remaining_epochs = self.cfg.train.num_epoch - latest_epoch
+            self.cfg.train.lr_scheduler.total_steps = remaining_epochs * self.iters_per_epoch
+            self.log_info(f"Resetting scheduler for remaining {remaining_epochs} epochs ({self.cfg.train.lr_scheduler.total_steps} steps)")
+            self.lr_scheduler = build_scheduler(
+                self.cfg.train.lr_scheduler, optimizer=self.optimizer
+            )
+            # Re-wrap with accelerator
+            self.lr_scheduler = self.accelerator.prepare(self.lr_scheduler)
+            current_lr = self.optimizer.param_groups[0]['lr']
+            self.log_info(f"Starting learning rate: {current_lr:.8f}")
 
         os.makedirs(self.cfg.log.ckpt_dir, exist_ok=True)
 
@@ -287,7 +312,7 @@ class BaseTrainer:
         self.log_info(f"Start validation for epoch {epoch}")
         with torch.no_grad():
             for batch in metric_logger.log_every(
-                self.test_loader, self.cfg.train.print_freq, header
+                self.test_loader, self.cfg.train.print_freq, header, total_iters=self.iters_per_test
             ):
                 batch = move_to_device(batch, self.accelerator.device)
 
@@ -303,7 +328,8 @@ class BaseTrainer:
 
                 # Log depth visualizations periodically
                 if hasattr(self, 'log_depth_visualizations') and total_samples <= len(batch):
-                    self.log_depth_visualizations(forward_output, batch, self.global_step, mode='val')
+                    depth_scale = outputs.get('depth_scale', None)
+                    self.log_depth_visualizations(forward_output, batch, self.global_step, mode='val', depth_scale=depth_scale)
 
                 metric_logger.update(**outputs)
 
@@ -338,7 +364,7 @@ class BaseTrainer:
         )
 
         for it, batch in enumerate(metric_logger.log_every(
-            self.train_loader, self.cfg.train.print_freq, header
+            self.train_loader, self.cfg.train.print_freq, header, total_iters=self.iters_per_epoch
         )):
             if it >= self.iters_per_epoch:
                 break
@@ -410,8 +436,11 @@ class BaseTrainer:
 
                     # Log depth visualizations periodically
                     if hasattr(self, 'log_depth_visualizations') and hasattr(self, 'viz_interval'):
-                        if start_steps % self.viz_interval == 0:
-                            self.log_depth_visualizations(forward_output, batch, start_steps, mode='train')
+                        # Visualize on first step of training or at regular intervals
+                        relative_step = start_steps - self.initial_global_step
+                        if relative_step == 1 or relative_step % self.viz_interval == 0:
+                            depth_scale = batch_output.get('depth_scale', None)
+                            self.log_depth_visualizations(forward_output, batch, start_steps, mode='train', depth_scale=depth_scale)
 
                     min_lr = 10.0
                     max_lr = 0.0
@@ -597,14 +626,28 @@ class BaseTrainer:
 
         if path is None:
             self.log_info("Checkpoint does not exist. Starting a new training run.")
-            
+
             start_epoch = 0
         else:
             self.log_info(f"Resuming from checkpoint {path}")
-            self.accelerator.load_state(
-                # os.path.join(self.cfg.log.ckpt_dir, path)
-                path
-            )
+
+            # Load only model weights, skip optimizer/scheduler to avoid parameter group mismatch
+            model_path = os.path.join(path, "pytorch_model.bin")
+            if os.path.exists(model_path):
+                state_dict = torch.load(model_path, map_location=self.accelerator.device)
+                # Unwrap model if it's wrapped by accelerator
+                model_to_load = self.accelerator.unwrap_model(self.model)
+                missing_keys, unexpected_keys = model_to_load.load_state_dict(state_dict, strict=False)
+                if missing_keys:
+                    self.log_info(f"Missing keys when loading model: {missing_keys}")
+                if unexpected_keys:
+                    self.log_info(f"Unexpected keys when loading model: {unexpected_keys}")
+                self.log_info("Model weights loaded successfully. Optimizer and scheduler will start fresh.")
+            else:
+                self.log_info(f"Model checkpoint not found at {model_path}, skipping resume.")
+                start_epoch = 0
+                return start_epoch
+
             # Extract epoch number from checkpoint path
             # Handles both "checkpoint_N" and "best_model" formats
             if "checkpoint_" in path:

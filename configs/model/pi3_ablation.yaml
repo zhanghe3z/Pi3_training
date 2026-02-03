@@ -1,7 +1,11 @@
 # @package _global_
 
+# Ablation Study Model Configuration
+# - Uses Pure Linear Head (no Transformer decoder)
+# - Uses Simple L1 Loss (no scale-invariant alignment)
+
 model:
-    _target_: pi3.models.pi3_training.Pi3
+    _target_: pi3.models.pi3_training_ablation.Pi3Ablation
     pos_type: rope100
     decoder_size: large
     load_vggt: false
@@ -12,12 +16,12 @@ model:
     ckpt: null # <path-to-your-pretrain-checkpoint>
 
 loss:
-    train_loss: 
-        _target_: pi3.models.loss.Pi3Loss
+    train_loss:
+        _target_: pi3.models.loss_ablation.Pi3LossAblation
         train_conf: false
 
     test_loss:
-        _target_: pi3.models.loss.Pi3Loss
+        _target_: pi3.models.loss_ablation.Pi3LossAblation
         train_conf: false
 
 train:
@@ -40,8 +44,8 @@ train:
     clip_loss: 10
 
     seed: 42
-    resume: /mnt/localssd/Pi3_training/outputs/pi3_hospital_lowres/ckpts/checkpoint_73
-    auto_resume: false          # Disabled auto_resume to use the specific checkpoint path
+    resume: null
+    auto_resume: false
     start_epoch: 0
     global_step: 0
     world_size: 1
@@ -69,10 +73,7 @@ train:
     lr_scheduler:
         type: CosineAnnealingLR
         eta_min: 1e-7
-        total_steps: -1  # Will be set to 40 epochs * iters_per_epoch
-
-    # Don't fast-forward scheduler when resuming (start fresh with 3e-5)
-    reset_scheduler_on_resume: true
+        total_steps: -1  # Will be set automatically
 
 test:
     num_workers: 16              # 16

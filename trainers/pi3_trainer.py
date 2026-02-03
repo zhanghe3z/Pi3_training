@@ -19,7 +19,7 @@ class Pi3Trainer(BaseTrainer):
         self.test_loss = hydra.utils.instantiate(cfg.loss.train_loss)
 
         # Configuration for depth visualization
-        self.viz_interval = cfg.get('viz_interval', 500)  # Log every N steps
+        self.viz_interval = cfg.get('viz_interval', 50)  # Log every N steps
         self.num_viz_samples = cfg.get('num_viz_samples', 2)  # Number of samples to visualize
 
     def build_optimizer(self, cfg_optimizer, model):
@@ -95,14 +95,68 @@ class Pi3Trainer(BaseTrainer):
         output, batch = output
 
         if mode == 'train':
-            loss, details = self.train_loss(output, batch)
+            result = self.train_loss(output, batch)
         else:
-            loss, details = self.test_loss(output, batch)
+            result = self.test_loss(output, batch)
+
+        # Extract loss, details, and scale from Pi3Loss
+        if isinstance(result, tuple) and len(result) == 3:
+            loss, details, scale = result
+            details['depth_scale'] = scale  # Store scale for visualization
+        else:
+            loss, details = result
+            details['depth_scale'] = None
 
         return EasyDict(
             loss=loss,
             **details
         )
+
+    def align_depth_to_gt(self, depth_pred, depth_gt):
+        """
+        Align predicted depth to ground truth using scale and shift.
+        Solves: depth_aligned = scale * depth_pred + shift
+        to minimize ||depth_aligned - depth_gt||^2 over valid pixels.
+
+        Returns:
+            depth_aligned: aligned depth map
+            scale: computed scale factor
+            shift: computed shift value
+        """
+        # Ensure numpy arrays
+        if isinstance(depth_pred, torch.Tensor):
+            depth_pred = depth_pred.cpu().detach().numpy()
+        if isinstance(depth_gt, torch.Tensor):
+            depth_gt = depth_gt.cpu().detach().numpy()
+
+        # Find valid pixels (gt > 0)
+        valid_mask = depth_gt > 0
+
+        if not valid_mask.any():
+            return depth_pred, 1.0, 0.0
+
+        # Get valid depth values
+        pred_valid = depth_pred[valid_mask].flatten()
+        gt_valid = depth_gt[valid_mask].flatten()
+
+        # Solve least squares: [pred, 1] * [scale, shift]^T = gt
+        # Using closed form solution
+        A = np.stack([pred_valid, np.ones_like(pred_valid)], axis=1)
+        b = gt_valid
+
+        # Solve: A^T A x = A^T b
+        try:
+            params = np.linalg.lstsq(A, b, rcond=None)[0]
+            scale, shift = params[0], params[1]
+        except:
+            # Fallback to simple median-based alignment
+            scale = np.median(gt_valid / (pred_valid + 1e-8))
+            shift = np.median(gt_valid - scale * pred_valid)
+
+        # Apply alignment
+        depth_aligned = scale * depth_pred + shift
+
+        return depth_aligned, scale, shift
 
     def create_depth_visualization(self, rgb, depth_gt, depth_pred, vmin=None, vmax=None):
         """Create a side-by-side visualization of RGB, GT depth, and predicted depth."""
@@ -133,18 +187,22 @@ class Pi3Trainer(BaseTrainer):
         axes[1].axis('off')
         plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
 
-        # Predicted Depth
+        # Predicted Depth - Align to GT first
         if isinstance(depth_pred, torch.Tensor):
             depth_pred = depth_pred.cpu().detach().numpy()
-        im2 = axes[2].imshow(depth_pred, cmap='turbo', vmin=vmin, vmax=vmax)
-        axes[2].set_title('Predicted Depth')
+
+        # Align predicted depth to GT using scale and shift
+        depth_pred_aligned, scale, shift = self.align_depth_to_gt(depth_pred, depth_gt)
+
+        im2 = axes[2].imshow(depth_pred_aligned, cmap='turbo', vmin=vmin, vmax=vmax)
+        axes[2].set_title(f'Predicted Depth (Aligned)\nscale={scale:.3f}, shift={shift:.3f}')
         axes[2].axis('off')
         plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
 
         plt.tight_layout()
         return fig
 
-    def log_depth_visualizations(self, output, batch, step, mode='train'):
+    def log_depth_visualizations(self, output, batch, step, mode='train', depth_scale=None):
         """Log depth visualizations to wandb."""
         if not self.cfg.log.use_wandb or not self.accelerator.is_main_process:
             return
@@ -158,6 +216,12 @@ class Pi3Trainer(BaseTrainer):
                 return
 
             depth_pred = pred['local_points'][:, :, :, :, 2]  # (B, N, H, W)
+
+            # Apply scale to predicted depth if available
+            if depth_scale is not None:
+                # depth_scale shape: (B,)
+                # Reshape to (B, 1, 1, 1) for broadcasting
+                depth_pred = depth_pred * depth_scale.view(-1, 1, 1, 1)
 
             # batch_views is a list of views
             # Visualize samples from the first view

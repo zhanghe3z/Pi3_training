@@ -27,6 +27,8 @@ echo ""
 echo "[Stage 1/3] Starting Low-Resolution Training..."
 echo "Resolution: 224x224"
 echo "Epochs: 80"
+echo "Depth Visualization: Every 10 steps (starting from step 0)"
+echo "Number of Samples: 4"
 echo ""
 
 accelerate launch --config_file configs/accelerate/ddp.yaml \
@@ -37,7 +39,9 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
     data=${DATA_CONFIG} \
     name=pi3_hospital_lowres \
     log.use_wandb=true \
-    log.use_tensorboard=false
+    log.use_tensorboard=false \
+    viz_interval=200 \
+    num_viz_samples=2
 
 # Check if Stage 1 completed successfully
 if [ $? -eq 0 ]; then
@@ -65,6 +69,8 @@ echo ""
 echo "[Stage 2/3] Starting High-Resolution Training..."
 echo "Loading checkpoint: ${LOWRES_CKPT}"
 echo "Epochs: 40"
+echo "Depth Visualization: Every 10 steps"
+echo "Number of Samples: 4"
 echo ""
 
 accelerate launch --config_file configs/accelerate/ddp.yaml \
@@ -76,7 +82,9 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
     name=pi3_hospital_highres \
     model.ckpt=${LOWRES_CKPT} \
     log.use_wandb=true \
-    log.use_tensorboard=false
+    log.use_tensorboard=false \
+    viz_interval=200 \
+    num_viz_samples=4
 
 # Check if Stage 2 completed successfully
 if [ $? -eq 0 ]; then
@@ -126,7 +134,9 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
             name=pi3_hospital_conf \
             model.ckpt=${HIGHRES_CKPT} \
             log.use_wandb=true \
-            log.use_tensorboard=false
+            log.use_tensorboard=false \
+            viz_interval=200 \
+            num_viz_samples=4
 
         if [ $? -eq 0 ]; then
             echo ""
