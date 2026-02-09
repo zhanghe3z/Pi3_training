@@ -53,8 +53,8 @@ class ImageList:
         return [getattr(im, func)(*args, **kwargs) for im in self.images]
 
 
-def rescale_image_depthmap(image, depthmap, camera_intrinsics, output_resolution, force=True, normal=None, far_mask=None):
-    """ Jointly rescale a (image, depthmap) 
+def rescale_image_depthmap(image, depthmap, camera_intrinsics, output_resolution, force=True, normal=None, far_mask=None, depthmap_linear=None):
+    """ Jointly rescale a (image, depthmap)
         so that (out_width, out_height) >= output_res
     """
     image = ImageList(image)
@@ -68,29 +68,34 @@ def rescale_image_depthmap(image, depthmap, camera_intrinsics, output_resolution
     assert output_resolution.shape == (2,)
     scale_final = max(output_resolution / image.size) + 1e-8
     if scale_final >= 1 and not force:  # image is already smaller than what is asked
-        return (image.to_pil(), depthmap, camera_intrinsics)
+        return (image.to_pil(), depthmap, camera_intrinsics, normal, far_mask, depthmap_linear)
     output_resolution = np.floor(input_resolution * scale_final).astype(int)
 
     # first rescale the image so that it contains the crop
     image = image.resize(tuple(output_resolution), resample=lanczos if scale_final < 1 else bicubic)
     if depthmap is not None:
-        depthmap = cv2.resize(depthmap, output_resolution, fx=scale_final,
+        depthmap = cv2.resize(depthmap, tuple(output_resolution), fx=scale_final,
                               fy=scale_final, interpolation=cv2.INTER_NEAREST)
-        
+
+    # Resize depthmap_linear using linear interpolation for variance calculation
+    if depthmap_linear is not None:
+        depthmap_linear = cv2.resize(depthmap_linear, tuple(output_resolution), fx=scale_final,
+                                     fy=scale_final, interpolation=cv2.INTER_LINEAR)
+
     if normal is not None:
-        normal = cv2.resize(normal, output_resolution, fx=scale_final,
+        normal = cv2.resize(normal, tuple(output_resolution), fx=scale_final,
                               fy=scale_final, interpolation=cv2.INTER_NEAREST)
     if far_mask is not None:
-        far_mask = cv2.resize(far_mask, output_resolution, fx=scale_final,
+        far_mask = cv2.resize(far_mask, tuple(output_resolution), fx=scale_final,
                               fy=scale_final, interpolation=cv2.INTER_NEAREST)
 
     # no offset here; simple rescaling
     camera_intrinsics = camera_matrix_of_crop(
         camera_intrinsics, input_resolution, output_resolution, scaling=scale_final)
 
-    return image.to_pil(), depthmap, camera_intrinsics, normal, far_mask
+    return image.to_pil(), depthmap, camera_intrinsics, normal, far_mask, depthmap_linear
 
-def center_crop_image_depthmap(image, depthmap, camera_intrinsics, crop_scale, normal=None, far_mask=None):
+def center_crop_image_depthmap(image, depthmap, camera_intrinsics, crop_scale, normal=None, far_mask=None, depthmap_linear=None):
     """
     Jointly center-crop an image and its depthmap, and adjust the camera intrinsics accordingly.
 
@@ -134,6 +139,8 @@ def center_crop_image_depthmap(image, depthmap, camera_intrinsics, crop_scale, n
     image = image.crop(crop_bbox)
     if depthmap is not None:
         depthmap = depthmap[t:b, l:r]
+    if depthmap_linear is not None:
+        depthmap_linear = depthmap_linear[t:b, l:r]
     if normal is not None:
         normal = normal[t:b, l:r]
     if far_mask is not None:
@@ -150,7 +157,7 @@ def center_crop_image_depthmap(image, depthmap, camera_intrinsics, crop_scale, n
     adjusted_intrinsics[0, 2] -= l  # cx
     adjusted_intrinsics[1, 2] -= t  # cy
 
-    return image.to_pil(), depthmap, adjusted_intrinsics, normal, far_mask
+    return image.to_pil(), depthmap, adjusted_intrinsics, normal, far_mask, depthmap_linear
 
 
 def camera_matrix_of_crop(input_camera_matrix, input_resolution, output_resolution, scaling=1, offset_factor=0.5, offset=None):
@@ -169,7 +176,7 @@ def camera_matrix_of_crop(input_camera_matrix, input_resolution, output_resoluti
     return output_camera_matrix
 
 
-def crop_image_depthmap(image, depthmap, camera_intrinsics, crop_bbox, normal=None, far_mask=None):
+def crop_image_depthmap(image, depthmap, camera_intrinsics, crop_bbox, normal=None, far_mask=None, depthmap_linear=None):
     """
     Return a crop of the input view.
     """
@@ -178,6 +185,8 @@ def crop_image_depthmap(image, depthmap, camera_intrinsics, crop_bbox, normal=No
 
     image = image.crop((l, t, r, b))
     depthmap = depthmap[t:b, l:r]
+    if depthmap_linear is not None:
+        depthmap_linear = depthmap_linear[t:b, l:r]
     if normal is not None:
         normal = normal[t:b, l:r]
     if far_mask is not None:
@@ -187,7 +196,7 @@ def crop_image_depthmap(image, depthmap, camera_intrinsics, crop_bbox, normal=No
     camera_intrinsics[0, 2] -= l
     camera_intrinsics[1, 2] -= t
 
-    return image.to_pil(), depthmap, camera_intrinsics, normal, far_mask
+    return image.to_pil(), depthmap, camera_intrinsics, normal, far_mask, depthmap_linear
 
 
 def bbox_from_intrinsics_in_out(input_camera_matrix, output_camera_matrix, output_resolution):

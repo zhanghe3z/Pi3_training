@@ -34,10 +34,11 @@ def angle_diff_vec3(v1: torch.Tensor, v2: torch.Tensor, eps: float = 1e-12):
 # ---------------------------------------------------------------------------
 
 class PointLoss(nn.Module):
-    def __init__(self, local_align_res=4096, train_conf=False, expected_dist_thresh=0.02):
+    def __init__(self, local_align_res=4096, train_conf=False, expected_dist_thresh=0.02, use_scale_align=True):
         super().__init__()
         self.local_align_res = local_align_res
         self.criteria_local = nn.L1Loss(reduction='none')
+        self.use_scale_align = use_scale_align
 
         self.train_conf = train_conf
         if self.train_conf:
@@ -118,20 +119,31 @@ class PointLoss(nn.Module):
 
         B, N, H, W, _ = pred_local_pts.shape
 
+        # 计算权重，基于 z 坐标（深度）
         weights_ = gt_local_pts[..., 2]
-        weights_ = weights_.clamp_min(0.1 * weighted_mean(weights_, valid_masks, dim=(-2, -1), keepdim=True))
+        # 只使用有效像素来计算平均深度，避免无效深度影响
+        mean_depth = weighted_mean(weights_, valid_masks, dim=(-2, -1), keepdim=True)
+        # 限制深度范围：最小0.1倍平均深度，最大10倍平均深度
+        # 这样远处点的权重不会衰减太多（最小权重 = 1/(10*mean_depth) = 0.1/mean_depth）
+        weights_ = weights_.clamp(0.1 * mean_depth.clamp_min(1e-6), 10.0 * mean_depth.clamp_min(1e-6))
+        # 权重为深度的倒数（近处点权重大，但远处点权重有下限）
         weights_ = 1 / (weights_ + 1e-6)
 
-        # alignment
-        with torch.no_grad():
-            xyz_pred_local = self.prepare_ROE(pred_local_pts.reshape(B, N, H, W, 3), valid_masks.reshape(B, N, H, W), target_size=self.local_align_res).contiguous()
-            xyz_gt_local = self.prepare_ROE(gt_local_pts.reshape(B, N, H, W, 3), valid_masks.reshape(B, N, H, W), target_size=self.local_align_res).contiguous()
-            xyz_weights_local = self.prepare_ROE((weights_[..., None]).reshape(B, N, H, W, 1), valid_masks.reshape(B, N, H, W), target_size=self.local_align_res).contiguous()[:, :, 0]
+        # alignment (optional based on use_scale_align flag)
+        if self.use_scale_align:
+            with torch.no_grad():
+                xyz_pred_local = self.prepare_ROE(pred_local_pts.reshape(B, N, H, W, 3), valid_masks.reshape(B, N, H, W), target_size=self.local_align_res).contiguous()
+                xyz_gt_local = self.prepare_ROE(gt_local_pts.reshape(B, N, H, W, 3), valid_masks.reshape(B, N, H, W), target_size=self.local_align_res).contiguous()
+                xyz_weights_local = self.prepare_ROE((weights_[..., None]).reshape(B, N, H, W, 1), valid_masks.reshape(B, N, H, W), target_size=self.local_align_res).contiguous()[:, :, 0]
 
-            S_opt_local = align_points_scale(xyz_pred_local, xyz_gt_local, xyz_weights_local)
-            S_opt_local[S_opt_local <= 0] *= -1
+                S_opt_local = align_points_scale(xyz_pred_local, xyz_gt_local, xyz_weights_local)
+                S_opt_local[S_opt_local <= 0] *= -1
 
-        aligned_local_pts = S_opt_local.view(B, 1, 1, 1, 1) * pred_local_pts
+            aligned_local_pts = S_opt_local.view(B, 1, 1, 1, 1) * pred_local_pts
+        else:
+            # No scale alignment in loss computation
+            S_opt_local = torch.ones(B, device=pred_local_pts.device)
+            aligned_local_pts = pred_local_pts
 
         # local point loss
         local_pts_loss = self.criteria_local(aligned_local_pts[valid_masks].float(), gt_local_pts[valid_masks].float()) * weights_[valid_masks].float()[..., None]
@@ -150,7 +162,7 @@ class PointLoss(nn.Module):
                 sky_mask_loss = 0.0 * aligned_local_pts.mean()
             else:
                 sky_mask_loss = self.conf_loss_fn(pred_conf[sky_mask], torch.zeros_like(pred_conf[sky_mask]))
-            
+
             final_loss += 0.05 * (local_conf_loss + sky_mask_loss)
             details['local_conf_loss'] = (local_conf_loss + sky_mask_loss)
 
@@ -170,7 +182,11 @@ class PointLoss(nn.Module):
         if 'global_points' in pred and pred['global_points'] is not None:
             gt_pts = gt['global_points']
 
-            pred_global_pts = pred['global_points'] * S_opt_local.view(B, 1, 1, 1, 1)
+            if self.use_scale_align:
+                pred_global_pts = pred['global_points'] * S_opt_local.view(B, 1, 1, 1, 1)
+            else:
+                pred_global_pts = pred['global_points']
+
             global_pts_loss = self.criteria_local(pred_global_pts[valid_masks].float(), gt_pts[valid_masks].float()) * weights_[valid_masks].float()[..., None]
 
             final_loss += global_pts_loss.mean()
@@ -249,10 +265,15 @@ class Pi3Loss(nn.Module):
     def __init__(
         self,
         train_conf=False,
+        use_local_alignment_normalize=False,
+        local_align_res=4096,
     ):
         super().__init__()
-        self.point_loss = PointLoss(train_conf=train_conf)
+        # If using local alignment normalize, disable scale align in PointLoss
+        use_scale_align = not use_local_alignment_normalize
+        self.point_loss = PointLoss(train_conf=train_conf, local_align_res=local_align_res, use_scale_align=use_scale_align)
         self.camera_loss = CameraLoss()
+        self.use_local_alignment_normalize = use_local_alignment_normalize
 
     def prepare_gt(self, gt):
         gt_pts = torch.stack([view['pts3d'] for view in gt], dim=1)
@@ -261,38 +282,52 @@ class Pi3Loss(nn.Module):
 
         B, N, H, W, _ = gt_pts.shape
 
-        # transform to first frame camera coordinate
-        w2c_target = se3_inverse(poses[:, 0])
-        gt_pts = torch.einsum('bij, bnhwj -> bnhwi', w2c_target, homogenize_points(gt_pts))[..., :3]
-        poses = torch.einsum('bij, bnjk -> bnik', w2c_target, poses)
+        # For new mode: convert world coords to local camera coords directly
+        if self.use_local_alignment_normalize:
+            # gt_pts is in world coordinates, convert to each camera's local coordinates
+            extrinsics = se3_inverse(poses)
+            gt_local_pts = torch.einsum('bnij, bnhwj -> bnhwi', extrinsics, homogenize_points(gt_pts))[..., :3]
 
-        # normalize points
-        valid_batch = masks.sum([-1, -2, -3]) > 0
-        if valid_batch.sum() > 0:
-            B_ = valid_batch.sum()
-            all_pts = gt_pts[valid_batch].clone()
-            all_pts[~masks[valid_batch]] = 0
-            all_pts = all_pts.reshape(B_, N, -1, 3)
-            all_dis = all_pts.norm(dim=-1)
-            norm_factor = all_dis.sum(dim=[-1, -2]) / (masks[valid_batch].float().sum(dim=[-1, -2, -3]) + 1e-8)
+            # Transform poses to relative to first frame
+            w2c_target = se3_inverse(poses[:, 0])
+            poses = torch.einsum('bij, bnjk -> bnik', w2c_target, poses)
 
-            gt_pts[valid_batch] = gt_pts[valid_batch] / norm_factor[..., None, None, None, None]
-            poses[valid_batch, ..., :3, 3] /= norm_factor[..., None, None]
+            # Global points not used in new mode, set to None to save memory
+            gt_global_pts = None
+        else:
+            # Original mode: transform to first frame camera coordinate
+            w2c_target = se3_inverse(poses[:, 0])
+            gt_pts = torch.einsum('bij, bnhwj -> bnhwi', w2c_target, homogenize_points(gt_pts))[..., :3]
+            poses = torch.einsum('bij, bnjk -> bnik', w2c_target, poses)
 
-        extrinsics = se3_inverse(poses)
-        gt_local_pts = torch.einsum('bnij, bnhwj -> bnhwi', extrinsics, homogenize_points(gt_pts))[..., :3]
-        
+            # normalize points
+            valid_batch = masks.sum([-1, -2, -3]) > 0
+            if valid_batch.sum() > 0:
+                B_ = valid_batch.sum()
+                all_pts = gt_pts[valid_batch].clone()
+                all_pts[~masks[valid_batch]] = 0
+                all_pts = all_pts.reshape(B_, N, -1, 3)
+                all_dis = all_pts.norm(dim=-1)
+                norm_factor = all_dis.sum(dim=[-1, -2]) / (masks[valid_batch].float().sum(dim=[-1, -2, -3]) + 1e-8)
+
+                gt_pts[valid_batch] = gt_pts[valid_batch] / norm_factor[..., None, None, None, None]
+                poses[valid_batch, ..., :3, 3] /= norm_factor[..., None, None]
+
+            extrinsics = se3_inverse(poses)
+            gt_local_pts = torch.einsum('bnij, bnhwj -> bnhwi', extrinsics, homogenize_points(gt_pts))[..., :3]
+            gt_global_pts = gt_pts
+
         dataset_names = gt[0]['dataset']
 
         return dict(
             imgs = torch.stack([view['img'] for view in gt], dim=1),
-            global_points=gt_pts,
+            global_points=gt_global_pts,
             local_points=gt_local_pts,
             valid_masks=masks,
             camera_poses=poses,
             dataset_names=dataset_names
         )
-    
+
     def normalize_pred(self, pred, gt):
         local_points = pred['local_points']
         camera_poses = pred['camera_poses']
@@ -318,9 +353,68 @@ class Pi3Loss(nn.Module):
 
         return pred
 
+    def normalize_with_local_alignment(self, pred, gt):
+        """
+        Normalize both GT and Pred using pred local points statistics
+        """
+        pred_local_pts = pred['local_points']
+        gt_local_pts = gt['local_points']
+        valid_masks = gt['valid_masks']
+        camera_poses = pred['camera_poses']
+        gt_camera_poses = gt['camera_poses']
+
+        B, N, H, W, _ = pred_local_pts.shape
+
+        # Calculate norm_factor from pred local points
+        all_pts = pred_local_pts.clone()
+        all_pts[~valid_masks] = 0
+        all_pts = all_pts.reshape(B, N, -1, 3)
+        all_dis = all_pts.norm(dim=-1)
+        norm_factor_pred = all_dis.sum(dim=[-1, -2]) / (valid_masks.float().sum(dim=[-1, -2, -3]) + 1e-8)
+
+        # Calculate norm_factor from gt local points
+        all_pts_gt = gt_local_pts.clone()
+        all_pts_gt[~valid_masks] = 0
+        all_pts_gt = all_pts_gt.reshape(B, N, -1, 3)
+        all_dis_gt = all_pts_gt.norm(dim=-1)
+        norm_factor_gt = all_dis_gt.sum(dim=[-1, -2]) / (valid_masks.float().sum(dim=[-1, -2, -3]) + 1e-8)
+
+        # Apply respective norm_factors to GT and Pred local points
+        gt_local_pts_normalized = gt_local_pts / norm_factor_gt[..., None, None, None, None]
+        pred_local_pts_normalized = pred_local_pts / norm_factor_pred[..., None, None, None, None]
+
+        # Also normalize global points if present
+        if 'global_points' in pred and pred['global_points'] is not None:
+            pred['global_points'] = pred['global_points'] / norm_factor_pred[..., None, None, None, None]
+
+        if 'global_points' in gt and gt['global_points'] is not None:
+            gt['global_points'] = gt['global_points'] / norm_factor_gt[..., None, None, None, None]
+
+        # Normalize camera poses
+        camera_poses_normalized = camera_poses.clone()
+        camera_poses_normalized[..., :3, 3] /= norm_factor_pred.view(B, 1, 1)
+
+        gt_camera_poses_normalized = gt_camera_poses.clone()
+        gt_camera_poses_normalized[..., :3, 3] /= norm_factor_gt.view(B, 1, 1)
+
+        # Update pred and gt
+        pred['local_points'] = pred_local_pts_normalized
+        pred['camera_poses'] = camera_poses_normalized
+        gt['local_points'] = gt_local_pts_normalized
+        gt['camera_poses'] = gt_camera_poses_normalized
+
+        return pred, gt
+
     def forward(self, pred, gt_raw):
         gt = self.prepare_gt(gt_raw)
-        pred = self.normalize_pred(pred, gt)
+
+        # 步骤2：normalize Pred - 根据参数选择方法
+        if self.use_local_alignment_normalize:
+            # 使用 local alignment 同时 normalize GT 和 Pred
+            pred, gt = self.normalize_with_local_alignment(pred, gt)
+        else:
+            # 使用原来的方法分别 normalize
+            pred = self.normalize_pred(pred, gt)
 
         final_loss = 0.0
         details = dict()
@@ -331,9 +425,15 @@ class Pi3Loss(nn.Module):
         details.update(point_loss_details)
 
         # Camera Loss
-        camera_loss, camera_loss_details = self.camera_loss(pred, gt, scale)
+        if self.use_local_alignment_normalize:
+            # 已经做过 alignment，scale=1.0
+            camera_loss, camera_loss_details = self.camera_loss(pred, gt, torch.ones_like(scale))
+        else:
+            # 使用 PointLoss 返回的 scale
+            camera_loss, camera_loss_details = self.camera_loss(pred, gt, scale)
         final_loss += camera_loss * 0.1
         details.update(camera_loss_details)
 
         return final_loss, details
+
 

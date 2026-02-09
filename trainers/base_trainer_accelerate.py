@@ -376,7 +376,52 @@ class BaseTrainer:
                     forward_output = self.forward_batch(batch, mode='train')
                 batch_output = self.calculate_loss(forward_output, batch, mode='train')
                 loss = batch_output.loss
+
+                # DIAGNOSTIC: Check if loss exceeds clip threshold
                 if loss > self.cfg.train.clip_loss:
+                    if self.accelerator.is_main_process:
+                        print(f"\n{'='*80}")
+                        print(f"⚠️ WARNING: Loss clipping triggered at iter {it}, epoch {epoch}!")
+                        print(f"{'='*80}")
+                        print(f"  Loss value: {loss.item():.6f}")
+                        print(f"  Clip threshold: {self.cfg.train.clip_loss}")
+
+                        # Print detailed loss breakdown
+                        print(f"\n  Loss components:")
+                        for key in batch_output:
+                            if 'loss' in key and isinstance(batch_output[key], torch.Tensor):
+                                val = batch_output[key].item()
+                                print(f"    {key:20s}: {val:.6f}")
+
+                        # Check for NaN/Inf
+                        if torch.isnan(loss):
+                            print(f"\n  ❌ Loss is NaN!")
+                        if torch.isinf(loss):
+                            print(f"\n  ❌ Loss is Inf!")
+
+                        # Check model outputs
+                        pred = forward_output[0] if isinstance(forward_output, (list, tuple)) else forward_output
+                        if 'local_points' in pred:
+                            local_pts = pred['local_points']
+                            print(f"\n  Model output diagnostics:")
+                            print(f"    local_points shape: {local_pts.shape}")
+                            print(f"    local_points has NaN: {torch.isnan(local_pts).any().item()}")
+                            print(f"    local_points has Inf: {torch.isinf(local_pts).any().item()}")
+
+                            if not torch.isnan(local_pts).any() and not torch.isinf(local_pts).any():
+                                print(f"    local_points range: [{local_pts.min().item():.4f}, {local_pts.max().item():.4f}]")
+
+                            # Check depth channel specifically (z coordinate)
+                            depth = local_pts[..., 2]
+                            print(f"\n  Depth (z) diagnostics:")
+                            print(f"    depth has NaN: {torch.isnan(depth).any().item()}")
+                            print(f"    depth has Inf: {torch.isinf(depth).any().item()}")
+                            if not torch.isnan(depth).any() and not torch.isinf(depth).any():
+                                print(f"    depth range: [{depth.min().item():.4f}, {depth.max().item():.4f}]")
+                                print(f"    depth mean: {depth.mean().item():.4f}")
+
+                        print(f"{'='*80}\n")
+
                     loss = loss * 0.0
 
                 # Check if the loss is nan

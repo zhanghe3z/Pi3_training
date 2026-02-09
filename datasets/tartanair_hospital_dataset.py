@@ -142,14 +142,21 @@ class TarTanAirHospitalDataset(BaseDataset):
             rgb_image = np.array(Image.open(impath))
 
             depthmap = np.load(depthpath)
-            depthmap[depthmap > 80] = -1
+            depthmap[depthmap > 80] = 0  # 将无效深度设置为0，会被valid_mask过滤
 
-            rgb_image, depthmap, intrinsics = self._crop_resize_if_necessary(
+            result = self._crop_resize_if_necessary(
                 rgb_image, depthmap, self.intrinsics, resolution, rng=rng, info=impath)
+
+            rgb_image = result[0]
+            depthmap = result[1]
+            intrinsics = result[2]
+            # Extract depthmap_linear (last element in result)
+            depthmap_linear = result[-1] if len(result) > 3 else None
 
             views.append(dict(
                 img=rgb_image,
                 depthmap=depthmap,
+                depthmap_linear=depthmap_linear,
                 camera_pose=camera_pose,
                 camera_intrinsics=intrinsics.astype(np.float32),
                 dataset=self.dataset_label,

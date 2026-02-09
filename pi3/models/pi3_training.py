@@ -34,8 +34,12 @@ class Pi3(nn.Module):
             train_conf=False,
             num_dec_blk_not_to_checkpoint=4,
             ckpt=None,
+            depth_activation=None,
         ):
         super().__init__()
+
+        # Store depth activation type
+        self.depth_activation = depth_activation
 
         # ----------------------
         #        Encoder
@@ -274,7 +278,18 @@ class Pi3(nn.Module):
             point_hidden = point_hidden.float()
             ret = self.point_head([point_hidden[:, self.patch_start_idx:]], (H, W)).reshape(B, N, H, W, -1)
             xy, z = ret.split([2, 1], dim=-1)
-            z = torch.exp(z)
+
+            # SAFETY: Clip z before activation to prevent overflow
+            # Without clipping, exp(z) can easily overflow if z > 88
+            z = torch.clamp(z, min=-10, max=10)  # exp(10) ≈ 22026, exp(-10) ≈ 0.000045
+
+            # Apply depth activation based on configuration
+            if self.depth_activation == 'softplus':
+                z = torch.nn.functional.softplus(z)
+            else:
+                # Default: use exp activation
+                z = torch.exp(z)
+
             local_points = torch.cat([xy * z, z], dim=-1)
 
             # confidence

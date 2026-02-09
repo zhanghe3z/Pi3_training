@@ -1,0 +1,84 @@
+# @package _global_
+
+model:
+    _target_: pi3.models.pi3_training.Pi3
+    pos_type: rope100
+    decoder_size: large
+    load_vggt: false
+    freeze_encoder: true
+    use_global_points: false
+    train_conf: false
+    num_dec_blk_not_to_checkpoint: 4
+    ckpt: null # <path-to-your-pretrain-checkpoint>
+    depth_activation: null  # Can be overridden with 'softplus' or other activation functions
+
+loss:
+    train_loss:
+        _target_: pi3.models.loss.Pi3Loss
+        train_conf: false
+        use_local_alignment_normalize: true
+
+    test_loss:
+        _target_: pi3.models.loss.Pi3Loss
+        train_conf: false
+        use_local_alignment_normalize: true
+
+train:
+    num_workers: 16
+    batch_size: 1              # not use, dynamic batch size
+    num_epoch: 113             # 73 + 40 more epochs
+    iters_per_epoch: 800
+
+    print_freq: 40
+    base_seed: 666
+
+    model_dtype: bf16
+    # dynamic complie
+    dynamo_backend: NO  # CUDAGRAPHS  # INDUCTOR  # NO
+    dynamic_compile: true
+
+    # Training config
+    gradient_accumulation_steps: 1
+    clip_grad: 1.0
+    clip_loss: 10
+
+    seed: 42
+    resume: null
+    auto_resume: true
+    start_epoch: 0
+    global_step: 0
+    world_size: 1
+    rank: -1
+    gpu: -1
+    dist_on_itp: false
+    find_unused_parameters: false
+
+    # for distributed training
+    distributed: false
+    dist_url: env://
+    dist_backend: "nccl"
+
+    # Optimizer config
+    optimizer:
+        type: AdamW
+        lr: 5e-5
+        weight_decay: 5e-2
+        betas: [0.9, 0.95]
+        verbose: true
+        filter_bias_and_bn: true
+
+        encoder_lr: 5e-6
+
+    lr_scheduler:
+        type: CosineAnnealingLR
+        eta_min: 1e-7
+        total_steps: -1  # Will be set based on epochs * iters_per_epoch
+
+    # Don't fast-forward scheduler when resuming (start fresh)
+    reset_scheduler_on_resume: true
+
+test:
+    num_workers: 16
+    batch_size: 1              # not use, dynamic batch size
+    print_freq: 10
+    iters_per_test: -1

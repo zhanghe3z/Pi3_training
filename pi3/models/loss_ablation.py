@@ -3,8 +3,24 @@ import torch.nn.functional as F
 import torch.nn as nn
 from typing import *
 import math
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from pathlib import Path
+import sys
 
 from ..utils.geometry import homogenize_points, se3_inverse, depth_edge
+from .mipnerf_variance_loss import (
+    sigma_z2_from_gt_z_pixelwise,
+    weighted_l1_from_sigma_z2,
+    laplace_nll_from_sigma_z2
+)
+from .lean_variance_loss import (
+    lean_depth_moments_and_variance,
+    weighted_l1_from_variance,
+    laplace_nll_from_variance
+)
 
 from datasets import __HIGH_QUALITY_DATASETS__, __MIDDLE_QUALITY_DATASETS__
 
@@ -27,6 +43,67 @@ def _smooth(err: torch.FloatTensor, beta: float = 0.0) -> torch.FloatTensor:
 
 def angle_diff_vec3(v1: torch.Tensor, v2: torch.Tensor, eps: float = 1e-12):
     return torch.atan2(torch.cross(v1, v2, dim=-1).norm(dim=-1) + eps, (v1 * v2).sum(dim=-1))
+
+# ---------------------------------------------------------------------------
+# Visualization helper function
+# ---------------------------------------------------------------------------
+
+def save_depth_comparison(rgb, depth_gt, depth_pred, save_path, variance=None):
+    """Save side-by-side comparison of RGB, GT depth, predicted depth, and variance."""
+    num_plots = 4 if variance is not None else 3
+    fig, axes = plt.subplots(1, num_plots, figsize=(6 * num_plots, 6))
+
+    # RGB
+    if isinstance(rgb, torch.Tensor):
+        rgb = rgb.cpu().numpy()
+    if rgb.shape[0] == 3:  # C, H, W -> H, W, C
+        rgb = rgb.transpose(1, 2, 0)
+    if rgb.max() <= 1.0:
+        rgb = (rgb * 255).astype(np.uint8)
+    axes[0].imshow(rgb)
+    axes[0].set_title('RGB Image')
+    axes[0].axis('off')
+
+    # GT Depth
+    if isinstance(depth_gt, torch.Tensor):
+        depth_gt = depth_gt.cpu().numpy()
+    valid_gt = depth_gt > 0
+    vmin = depth_gt[valid_gt].min() if valid_gt.any() else 0
+    vmax = depth_gt[valid_gt].max() if valid_gt.any() else 80
+
+    im1 = axes[1].imshow(depth_gt, cmap='turbo', vmin=vmin, vmax=vmax)
+    axes[1].set_title('Ground Truth Depth')
+    axes[1].axis('off')
+    plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+
+    # Predicted Depth
+    if isinstance(depth_pred, torch.Tensor):
+        depth_pred = depth_pred.detach().cpu().numpy()
+
+    im2 = axes[2].imshow(depth_pred, cmap='turbo', vmin=vmin, vmax=vmax)
+    axes[2].set_title('Predicted Depth')
+    axes[2].axis('off')
+    plt.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+
+    # Variance (if provided)
+    if variance is not None:
+        if isinstance(variance, torch.Tensor):
+            variance = variance.detach().cpu().numpy()
+
+        # Compute variance statistics
+        var_min = variance[valid_gt].min() if valid_gt.any() else 0
+        var_max = variance[valid_gt].max() if valid_gt.any() else 1
+        var_mean = variance[valid_gt].mean() if valid_gt.any() else 0
+
+        im3 = axes[3].imshow(variance, cmap='plasma', vmin=var_min, vmax=var_max)
+        axes[3].set_title(f'Variance (mean={var_mean:.4f})')
+        axes[3].axis('off')
+        plt.colorbar(im3, ax=axes[3], fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Visualization saved to: {save_path}")
 
 # ---------------------------------------------------------------------------
 # ABLATION: Simple L1 PointLoss (No Scale-Invariant Alignment)
@@ -89,7 +166,9 @@ class PointLossAblation(nn.Module):
         B, N, H, W, _ = pred_local_pts.shape
 
         weights_ = gt_local_pts[..., 2]
-        weights_ = weights_.clamp_min(0.1 * weighted_mean(weights_, valid_masks, dim=(-2, -1), keepdim=True))
+        mean_depth = weighted_mean(weights_, valid_masks, dim=(-2, -1), keepdim=True)
+        # 限制深度范围：最小0.1倍平均深度，最大10倍平均深度，防止远处点衰减太多
+        weights_ = weights_.clamp(0.1 * mean_depth.clamp_min(1e-6), 10.0 * mean_depth.clamp_min(1e-6))
         weights_ = 1 / (weights_ + 1e-6)
 
         # ABLATION: No scale alignment, directly compute L1 loss
@@ -119,6 +198,213 @@ class PointLossAblation(nn.Module):
 
             final_loss += global_pts_loss.mean()
             details['global_pts_loss'] = global_pts_loss.mean()
+
+        return final_loss, details, S_opt_local
+
+# ---------------------------------------------------------------------------
+# ABLATION: mip-NeRF Variance-Weighted PointLoss
+# ---------------------------------------------------------------------------
+
+class PointLossMipNeRFVariance(nn.Module):
+    """
+    Ablation Study: Uses mip-NeRF inspired variance weighting for depth loss.
+
+    - Computes per-pixel depth variance from GT using local spatial variation
+      and depth-dependent prior
+    - Applies variance-weighted L1 loss on depth (Z coordinate)
+    - No scale alignment (similar to PointLossAblation)
+    """
+    def __init__(
+        self,
+        train_conf=False,
+        loss_type='weighted_l1',  # 'weighted_l1' or 'laplace_nll'
+        window=5,
+        lambda_prior=0.5,
+        alpha_clamp=0.3,
+    ):
+        super().__init__()
+        self.criteria_local = nn.L1Loss(reduction='none')
+        self.train_conf = train_conf
+        self.loss_type = loss_type
+        self.window = window
+        self.lambda_prior = lambda_prior
+        self.alpha_clamp = alpha_clamp
+
+        if self.train_conf:
+            raise NotImplementedError("Confidence training not supported in ablation loss")
+
+    def extract_intrinsics(self, gt_raw):
+        """
+        Extract intrinsics from GT data.
+        gt_raw is a list of N view dicts, each with batched tensors of shape (B, ...)
+        Returns fx, fy, cx, cy as tensors of shape (B*N,)
+        """
+        # gt_raw is [view1_dict, view2_dict, ...]
+        # Each view_dict['camera_intrinsics'] has shape (B, 3, 3)
+
+        intrinsics_list = []
+        for view in gt_raw:
+            K = view['camera_intrinsics']  # (B, 3, 3) tensor
+            intrinsics_list.append(K)
+
+        # Stack along view dimension: (N, B, 3, 3)
+        intrinsics = torch.stack(intrinsics_list, dim=0)
+
+        # Transpose to (B, N, 3, 3) then reshape to (B*N, 3, 3)
+        intrinsics = intrinsics.transpose(0, 1).reshape(-1, 3, 3)
+
+        fx = intrinsics[:, 0, 0]  # (B*N,)
+        fy = intrinsics[:, 1, 1]  # (B*N,)
+        cx = intrinsics[:, 0, 2]  # (B*N,)
+        cy = intrinsics[:, 1, 2]  # (B*N,)
+
+        return fx, fy, cx, cy
+
+    def noraml_loss(self, points, gt_points, mask):
+        not_edge = ~depth_edge(gt_points[..., 2], rtol=0.03)
+        mask = torch.logical_and(mask, not_edge)
+
+        leftup, rightup, leftdown, rightdown = points[..., :-1, :-1, :], points[..., :-1, 1:, :], points[..., 1:, :-1, :], points[..., 1:, 1:, :]
+        upxleft = torch.cross(rightup - rightdown, leftdown - rightdown, dim=-1)
+        leftxdown = torch.cross(leftup - rightup, rightdown - rightup, dim=-1)
+        downxright = torch.cross(leftdown - leftup, rightup - leftup, dim=-1)
+        rightxup = torch.cross(rightdown - leftdown, leftup - leftdown, dim=-1)
+
+        gt_leftup, gt_rightup, gt_leftdown, gt_rightdown = gt_points[..., :-1, :-1, :], gt_points[..., :-1, 1:, :], gt_points[..., 1:, :-1, :], gt_points[..., 1:, 1:, :]
+        gt_upxleft = torch.cross(gt_rightup - gt_rightdown, gt_leftdown - gt_rightdown, dim=-1)
+        gt_leftxdown = torch.cross(gt_leftup - gt_rightup, gt_rightdown - gt_rightup, dim=-1)
+        gt_downxright = torch.cross(gt_leftdown - gt_leftup, gt_rightup - gt_leftup, dim=-1)
+        gt_rightxup = torch.cross(gt_rightdown - gt_leftdown, gt_leftup - gt_leftdown, dim=-1)
+
+        mask_leftup, mask_rightup, mask_leftdown, mask_rightdown = mask[..., :-1, :-1], mask[..., :-1, 1:], mask[..., 1:, :-1], mask[..., 1:, 1:]
+        mask_upxleft = mask_rightup & mask_leftdown & mask_rightdown
+        mask_leftxdown = mask_leftup & mask_rightdown & mask_rightup
+        mask_downxright = mask_leftdown & mask_rightup & mask_leftup
+        mask_rightxup = mask_rightdown & mask_leftup & mask_leftdown
+
+        MIN_ANGLE, MAX_ANGLE, BETA_RAD = math.radians(1), math.radians(90), math.radians(3)
+
+        loss = mask_upxleft * _smooth(angle_diff_vec3(upxleft, gt_upxleft).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD) \
+                + mask_leftxdown * _smooth(angle_diff_vec3(leftxdown, gt_leftxdown).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD) \
+                + mask_downxright * _smooth(angle_diff_vec3(downxright, gt_downxright).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD) \
+                + mask_rightxup * _smooth(angle_diff_vec3(rightxup, gt_rightxup).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD)
+
+        loss = loss.mean() / (4 * max(points.shape[-3:-1]))
+
+        return loss
+
+    def forward(self, pred, gt, gt_raw=None):
+        """
+        Args:
+            pred: dict with 'local_points' (B, N, H, W, 3)
+            gt: dict with 'local_points', 'valid_masks', 'norm_factor' (optional), etc.
+            gt_raw: raw GT data with intrinsics (required for this loss)
+        """
+        if gt_raw is None:
+            raise ValueError("gt_raw is required for mip-NeRF variance loss to extract intrinsics")
+
+        pred_local_pts = pred['local_points']
+        gt_local_pts = gt['local_points']
+        valid_masks = gt['valid_masks']
+        details = dict()
+        final_loss = 0.0
+
+        B, N, H, W, _ = pred_local_pts.shape
+
+        # Extract intrinsics
+        fx, fy, cx, cy = self.extract_intrinsics(gt_raw)  # (B*N,)
+        # Compute depth variance for each view
+        # Reshape to (B*N, 1, H, W) for processing
+        gt_depth = gt_local_pts[..., 2].reshape(B*N, 1, H, W)
+
+        # Compute variance
+        sigma_Z2, sigma_t2, t_mu, t_delta = sigma_z2_from_gt_z_pixelwise(
+            gt_depth/10, fx, fy, cx, cy,
+            window=self.window,
+            lambda_prior=self.lambda_prior,
+            alpha_clamp=self.alpha_clamp
+        )
+
+        # CRITICAL FIX: Scale up variance by 1000x to prevent weight explosion
+        # When variance is too small, weights = 1/sqrt(variance) become too large
+        sigma_Z2 = sigma_Z2 * 1000.0
+
+        # Reshape back to (B, N, H, W)
+        sigma_Z2 = sigma_Z2.reshape(B, N, H, W)
+
+        # ABLATION: No scale alignment
+        S_opt_local = torch.ones(B, device=pred_local_pts.device)
+
+        # Extract predicted and GT depth
+        pred_depth = pred_local_pts[..., 2]  # (B, N, H, W)
+        gt_depth_reshaped = gt_local_pts[..., 2]  # (B, N, H, W)
+
+        # Debug: Check for issues
+        num_valid = valid_masks.sum().item()
+        if num_valid == 0:
+            print(f"[WARNING] No valid pixels! All masks are False.")
+            depth_loss = 0.0 * pred_depth.mean()
+            xy_loss = 0.0 * pred_depth.mean()
+        else:
+            # Apply variance-weighted depth loss only on valid pixels
+            if self.loss_type == 'weighted_l1':
+                # Compute weighted L1 for valid pixels
+                depth_diff = torch.abs(pred_depth - gt_depth_reshaped)  # (B, N, H, W)
+                sigma_std = torch.sqrt(sigma_Z2 + 1e-6)
+                # CRITICAL FIX: Clip sigma_std to minimum of 0.1 to prevent extremely large weights
+                sigma_std = torch.clamp(sigma_std, min=0.1)
+                weights = 0.1 / (sigma_std + 1e-6)
+                weighted_depth_loss = (weights * depth_diff)[valid_masks]
+
+                # Add statistics to details for wandb logging
+                # Keep as tensors for accelerator.gather(), will be converted to float later
+                details['sigma_Z2_min'] = sigma_Z2[valid_masks].min()
+                details['sigma_Z2_max'] = sigma_Z2[valid_masks].max()
+                details['sigma_Z2_mean'] = sigma_Z2[valid_masks].mean()
+                details['sigma_std_min'] = sigma_std[valid_masks].min()
+                details['sigma_std_max'] = sigma_std[valid_masks].max()
+                details['sigma_std_mean'] = sigma_std[valid_masks].mean()
+                details['weights_min'] = weights[valid_masks].min()
+                details['weights_max'] = weights[valid_masks].max()
+                details['weights_mean'] = weights[valid_masks].mean()
+                details['depth_diff_mean'] = depth_diff[valid_masks].mean()
+                details['depth_diff_max'] = depth_diff[valid_masks].max()
+                details['weighted_depth_loss_mean'] = weighted_depth_loss.mean()
+
+                depth_loss = weighted_depth_loss.mean()
+            elif self.loss_type == 'laplace_nll':
+                # Laplace NLL for valid pixels
+                sigma_std = torch.sqrt(sigma_Z2 + 1e-6)
+                # CRITICAL FIX: Clip sigma_std to minimum of 0.1 to prevent extremely large weights
+                sigma_std = torch.clamp(sigma_std, min=0.1)
+                # Convert to Laplace parameter b = sigma/sqrt(2)
+                b = sigma_std / torch.sqrt(torch.tensor(2.0, device=sigma_std.device, dtype=sigma_std.dtype))
+                b = b.clamp(min=1e-3)  # Extra safety
+                depth_diff = torch.abs(pred_depth - gt_depth_reshaped)
+                laplace_loss = (depth_diff / b + torch.log(b))[valid_masks]
+                depth_loss = laplace_loss.mean()
+            else:
+                raise ValueError(f"Unknown loss_type: {self.loss_type}")
+
+            # Also add XY loss (unweighted L1)
+            xy_loss = self.criteria_local(
+                pred_local_pts[..., :2][valid_masks].float(),
+                gt_local_pts[..., :2][valid_masks].float()
+            ).mean()
+
+        final_loss += depth_loss + xy_loss
+        details['depth_loss'] = depth_loss if torch.is_tensor(depth_loss) else torch.tensor(depth_loss, device=pred_local_pts.device)
+        details['xy_loss'] = xy_loss if torch.is_tensor(xy_loss) else torch.tensor(xy_loss, device=pred_local_pts.device)
+        details['local_pts_loss'] = details['depth_loss'] + details['xy_loss']
+
+        # normal loss (still use it for high quality datasets)
+        normal_batch_id = [i for i in range(len(gt['dataset_names'])) if gt['dataset_names'][i] in __HIGH_QUALITY_DATASETS__ + __MIDDLE_QUALITY_DATASETS__]
+        if len(normal_batch_id) == 0:
+            normal_loss = 0.0 * pred_local_pts.mean()
+        else:
+            normal_loss = self.noraml_loss(pred_local_pts[normal_batch_id], gt_local_pts[normal_batch_id], valid_masks[normal_batch_id])
+            final_loss += normal_loss.mean()
+        details['normal_loss'] = normal_loss.mean()
 
         return final_loss, details, S_opt_local
 
@@ -279,6 +565,467 @@ class Pi3LossAblation(nn.Module):
         details.update(point_loss_details)
 
         # Camera Loss (keep original)
+        camera_loss, camera_loss_details = self.camera_loss(pred, gt, scale)
+        final_loss += camera_loss * 0.1
+        details.update(camera_loss_details)
+
+        return final_loss, details
+
+# ---------------------------------------------------------------------------
+# GT-Only Normalization Loss
+# ---------------------------------------------------------------------------
+
+class Pi3LossGTOnlyNorm(nn.Module):
+    """
+    Loss variant that allows independent control over:
+    - Normalizing predicted points
+    - Normalizing GT points
+    - Using scale alignment in point loss
+    """
+    def __init__(
+        self,
+        train_conf=False,
+        normalize_pred=True,
+        normalize_gt=True,
+        use_scale_align=True,
+        local_align_res=4096,
+    ):
+        super().__init__()
+        # Import PointLoss from main loss module
+        from .loss import PointLoss
+        self.point_loss = PointLoss(
+            train_conf=train_conf,
+            local_align_res=local_align_res,
+            use_scale_align=use_scale_align
+        )
+        self.camera_loss = CameraLoss()
+        self.normalize_pred = normalize_pred
+        self.normalize_gt = normalize_gt
+
+    def prepare_gt(self, gt):
+        gt_pts = torch.stack([view['pts3d'] for view in gt], dim=1)
+        masks = torch.stack([view['valid_mask'] for view in gt], dim=1)
+        poses = torch.stack([view['camera_pose'] for view in gt], dim=1)
+
+        B, N, H, W, _ = gt_pts.shape
+
+        # Transform to first frame camera coordinate
+        w2c_target = se3_inverse(poses[:, 0])
+        gt_pts = torch.einsum('bij, bnhwj -> bnhwi', w2c_target, homogenize_points(gt_pts))[..., :3]
+        poses = torch.einsum('bij, bnjk -> bnik', w2c_target, poses)
+
+        # Optionally normalize GT points
+        if self.normalize_gt:
+            valid_batch = masks.sum([-1, -2, -3]) > 0
+            if valid_batch.sum() > 0:
+                B_ = valid_batch.sum()
+                all_pts = gt_pts[valid_batch].clone()
+                all_pts[~masks[valid_batch]] = 0
+                all_pts = all_pts.reshape(B_, N, -1, 3)
+                all_dis = all_pts.norm(dim=-1)
+                norm_factor = all_dis.sum(dim=[-1, -2]) / (masks[valid_batch].float().sum(dim=[-1, -2, -3]) + 1e-8)
+
+                gt_pts[valid_batch] = gt_pts[valid_batch] / norm_factor[..., None, None, None, None]
+                poses[valid_batch, ..., :3, 3] /= norm_factor[..., None, None]
+
+        extrinsics = se3_inverse(poses)
+        gt_local_pts = torch.einsum('bnij, bnhwj -> bnhwi', extrinsics, homogenize_points(gt_pts))[..., :3]
+
+        dataset_names = gt[0]['dataset']
+
+        return dict(
+            imgs=torch.stack([view['img'] for view in gt], dim=1),
+            global_points=gt_pts,
+            local_points=gt_local_pts,
+            valid_masks=masks,
+            camera_poses=poses,
+            dataset_names=dataset_names
+        )
+
+    def normalize_prediction(self, pred, gt):
+        """Normalize predicted points and camera poses"""
+        local_points = pred['local_points']
+        camera_poses = pred['camera_poses']
+        B, N, H, W, _ = local_points.shape
+        masks = gt['valid_masks']
+
+        # Normalize predict points
+        all_pts = local_points.clone()
+        all_pts[~masks] = 0
+        all_pts = all_pts.reshape(B, N, -1, 3)
+        all_dis = all_pts.norm(dim=-1)
+        norm_factor = all_dis.sum(dim=[-1, -2]) / (masks.float().sum(dim=[-1, -2, -3]) + 1e-8)
+        local_points = local_points / norm_factor[..., None, None, None, None]
+
+        if 'global_points' in pred and pred['global_points'] is not None:
+            pred['global_points'] /= norm_factor[..., None, None, None, None]
+
+        camera_poses_normalized = camera_poses.clone()
+        camera_poses_normalized[..., :3, 3] /= norm_factor.view(B, 1, 1)
+
+        pred['local_points'] = local_points
+        pred['camera_poses'] = camera_poses_normalized
+
+        return pred
+
+    def forward(self, pred, gt_raw):
+        gt = self.prepare_gt(gt_raw)
+
+        # Optionally normalize predicted points
+        if self.normalize_pred:
+            pred = self.normalize_prediction(pred, gt)
+
+        final_loss = 0.0
+        details = dict()
+
+        # Point Loss (with optional scale alignment)
+        point_loss, point_loss_details, scale = self.point_loss(pred, gt)
+        final_loss += point_loss
+        details.update(point_loss_details)
+
+        # Camera Loss
+        camera_loss, camera_loss_details = self.camera_loss(pred, gt, scale)
+        final_loss += camera_loss * 0.1
+        details.update(camera_loss_details)
+
+        return final_loss, details
+
+
+# ---------------------------------------------------------------------------
+# Lean Mapping Variance Loss (Kernel-Based Local Moments)
+# ---------------------------------------------------------------------------
+
+class PointLossLeanMapping(nn.Module):
+    """
+    Lean Mapping / VSM-style variance weighting for depth loss.
+
+    Uses kernel-based local moments to compute variance:
+    - M1 = E[z], M2 = E[z^2], Var = M2 - M1^2
+    - Supports Gaussian or box kernels
+    - Prior variance for low-support regions
+    - No scale alignment (similar to other ablation losses)
+    """
+    def __init__(
+        self,
+        train_conf=False,
+        loss_type='weighted_l1',  # 'weighted_l1' or 'laplace_nll'
+        kernel_size=7,
+        kernel='gaussian',  # 'gaussian' or 'box'
+        gaussian_sigma=None,  # default: kernel_size/6
+        min_valid_count=8,
+        prior_rel=0.1,
+        prior_abs=0.0,
+        std_min=0.1,
+    ):
+        super().__init__()
+        self.criteria_local = nn.L1Loss(reduction='none')
+        self.train_conf = train_conf
+        self.loss_type = loss_type
+        self.kernel_size = kernel_size
+        self.kernel = kernel
+        self.gaussian_sigma = gaussian_sigma
+        self.min_valid_count = min_valid_count
+        self.prior_rel = prior_rel
+        self.prior_abs = prior_abs
+        self.std_min = std_min
+
+        if self.train_conf:
+            raise NotImplementedError("Confidence training not supported in ablation loss")
+
+    def noraml_loss(self, points, gt_points, mask):
+        not_edge = ~depth_edge(gt_points[..., 2], rtol=0.03)
+        mask = torch.logical_and(mask, not_edge)
+
+        leftup, rightup, leftdown, rightdown = points[..., :-1, :-1, :], points[..., :-1, 1:, :], points[..., 1:, :-1, :], points[..., 1:, 1:, :]
+        upxleft = torch.cross(rightup - rightdown, leftdown - rightdown, dim=-1)
+        leftxdown = torch.cross(leftup - rightup, rightdown - rightup, dim=-1)
+        downxright = torch.cross(leftdown - leftup, rightup - leftup, dim=-1)
+        rightxup = torch.cross(rightdown - leftdown, leftup - leftdown, dim=-1)
+
+        gt_leftup, gt_rightup, gt_leftdown, gt_rightdown = gt_points[..., :-1, :-1, :], gt_points[..., :-1, 1:, :], gt_points[..., 1:, :-1, :], gt_points[..., 1:, 1:, :]
+        gt_upxleft = torch.cross(gt_rightup - gt_rightdown, gt_leftdown - gt_rightdown, dim=-1)
+        gt_leftxdown = torch.cross(gt_leftup - gt_rightup, gt_rightdown - gt_rightup, dim=-1)
+        gt_downxright = torch.cross(gt_leftdown - gt_leftup, gt_rightup - gt_leftup, dim=-1)
+        gt_rightxup = torch.cross(gt_rightdown - gt_leftdown, gt_leftup - gt_leftdown, dim=-1)
+
+        mask_leftup, mask_rightup, mask_leftdown, mask_rightdown = mask[..., :-1, :-1], mask[..., :-1, 1:], mask[..., 1:, :-1], mask[..., 1:, 1:]
+        mask_upxleft = mask_rightup & mask_leftdown & mask_rightdown
+        mask_leftxdown = mask_leftup & mask_rightdown & mask_rightup
+        mask_downxright = mask_leftdown & mask_rightup & mask_leftup
+        mask_rightxup = mask_rightdown & mask_leftup & mask_leftdown
+
+        MIN_ANGLE, MAX_ANGLE, BETA_RAD = math.radians(1), math.radians(90), math.radians(3)
+
+        loss = mask_upxleft * _smooth(angle_diff_vec3(upxleft, gt_upxleft).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD) \
+                + mask_leftxdown * _smooth(angle_diff_vec3(leftxdown, gt_leftxdown).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD) \
+                + mask_downxright * _smooth(angle_diff_vec3(downxright, gt_downxright).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD) \
+                + mask_rightxup * _smooth(angle_diff_vec3(rightxup, gt_rightxup).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD)
+
+        loss = loss.mean() / (4 * max(points.shape[-3:-1]))
+
+        return loss
+
+    def forward(self, pred, gt, gt_raw=None):
+        """
+        Args:
+            pred: dict with 'local_points' (B, N, H, W, 3)
+            gt: dict with 'local_points', 'valid_masks', etc.
+            gt_raw: raw GT data with depthmap for each view
+        """
+        pred_local_pts = pred['local_points']
+        gt_local_pts = gt['local_points']
+        valid_masks = gt['valid_masks']
+        details = dict()
+        final_loss = 0.0
+
+        B, N, H, W, _ = pred_local_pts.shape
+
+        # ABLATION: No scale alignment
+        S_opt_local = torch.ones(B, device=pred_local_pts.device)
+
+        # Extract predicted depth
+        pred_depth = pred_local_pts[..., 2]  # (B, N, H, W)
+
+        # Extract GT depth from gt_raw (original depthmap) instead of local_points
+        if gt_raw is not None:
+            # gt_raw is a list of N view dicts, each with batched tensors
+            # Stack all depthmaps: (B, N, H, W)
+            # Use nearest-neighbor interpolated depth for GT supervision
+            gt_depth = torch.stack([view['depthmap'] for view in gt_raw], dim=1)
+
+            # Use linear-interpolated depth for variance calculation
+            gt_depth_linear = torch.stack([view['depthmap_linear'] for view in gt_raw], dim=1)
+
+            # Normalize each depth map by its median (vectorized)
+            # Replace invalid values with nan for nanmedian computation
+            valid_mask_depth = (gt_depth > 0) & torch.isfinite(gt_depth)
+            gt_depth_masked = gt_depth.clone()
+            gt_depth_masked[~valid_mask_depth] = float('nan')
+
+            # Compute median along spatial dimensions for each (B, N)
+            # Reshape to (B, N, H*W) and compute nanmedian
+            B, N, H, W = gt_depth.shape
+            depth_flat = gt_depth_masked.reshape(B, N, H*W)
+            medians = torch.nanmedian(depth_flat, dim=-1).values  # (B, N)
+
+            # Handle cases where all values are nan (no valid pixels)
+            medians = torch.where(torch.isnan(medians), torch.ones_like(medians), medians)
+
+            # Normalize both depths: (B, N, H, W) / (B, N, 1, 1)
+            gt_depth_linear = gt_depth_linear / (medians[:, :, None, None] + 1e-6)
+        else:
+            # Fallback to using local_points if gt_raw is not available
+            gt_depth = gt_local_pts[..., 2]  # (B, N, H, W)
+            gt_depth_linear = gt_depth.clone()
+
+        # Compute Lean mapping variance for each view independently
+        # Reshape to (B*N, 1, H, W) for processing
+        # Use linear interpolated depth for variance calculation
+        gt_depth_linear_flat = gt_depth_linear.reshape(B*N, 1, H, W)
+        valid_masks_flat = valid_masks.reshape(B*N, 1, H, W)
+
+        # Compute variance using Lean mapping with linear interpolated depth
+        m1, m2, variance, count = lean_depth_moments_and_variance(
+            depth=gt_depth_linear_flat,
+            valid_mask=valid_masks_flat,
+            kernel_size=self.kernel_size,
+            kernel=self.kernel,
+            gaussian_sigma=self.gaussian_sigma,
+            min_valid_count=self.min_valid_count,
+            prior_rel=self.prior_rel,
+            prior_abs=self.prior_abs,
+        )
+
+        # Reshape back to (B, N, H, W)
+        variance = variance.reshape(B, N, H, W)
+        m1 = m1.reshape(B, N, H, W)
+        count = count.reshape(B, N, H, W)
+
+        # Debug: Check for issues
+        num_valid = valid_masks.sum().item()
+        if num_valid == 0:
+            print(f"[WARNING] No valid pixels! All masks are False.")
+            depth_loss = 0.0 * pred_depth.mean()
+            xy_loss = 0.0 * pred_depth.mean()
+        else:
+            # Apply variance-weighted depth loss only on valid pixels
+            # NOTE: gt_depth (nearest neighbor) is used for GT supervision
+            # while variance is computed from gt_depth_linear (linear interpolation)
+            if self.loss_type == 'weighted_l1':
+                # Compute weighted L1 for valid pixels
+                depth_diff = torch.abs(pred_depth - gt_depth)  # (B, N, H, W)
+                std = torch.sqrt(variance + 1e-6)
+                std = torch.clamp(std, min=self.std_min)
+                weights = 0.05 / (std + 1e-6)
+                weighted_depth_loss = (weights * depth_diff)[valid_masks]
+
+                # Add statistics to details for wandb logging
+                details['variance_min'] = variance[valid_masks].min()
+                details['variance_max'] = variance[valid_masks].max()
+                details['variance_mean'] = variance[valid_masks].mean()
+                details['std_min'] = std[valid_masks].min()
+                details['std_max'] = std[valid_masks].max()
+                details['std_mean'] = std[valid_masks].mean()
+                details['weights_min'] = weights[valid_masks].min()
+                details['weights_max'] = weights[valid_masks].max()
+                details['weights_mean'] = weights[valid_masks].mean()
+                details['depth_diff_mean'] = depth_diff[valid_masks].mean()
+                details['depth_diff_max'] = depth_diff[valid_masks].max()
+                details['m1_mean'] = m1[valid_masks].mean()
+                details['count_mean'] = count[valid_masks].mean()
+                details['weighted_depth_loss_mean'] = weighted_depth_loss.mean()
+
+                depth_loss = weighted_depth_loss.mean()
+            elif self.loss_type == 'laplace_nll':
+                # Laplace NLL for valid pixels
+                std = torch.sqrt(variance + 1e-6)
+                std = torch.clamp(std, min=self.std_min)
+                b = std / torch.sqrt(torch.tensor(2.0, device=std.device, dtype=std.dtype))
+                b = b.clamp(min=1e-3)
+                depth_diff = torch.abs(pred_depth - gt_depth)
+                laplace_loss = (depth_diff / b + torch.log(b))[valid_masks]
+                depth_loss = laplace_loss.mean()
+            else:
+                raise ValueError(f"Unknown loss_type: {self.loss_type}")
+
+            # Also add XY loss (unweighted L1)
+            xy_loss = self.criteria_local(
+                pred_local_pts[..., :2][valid_masks].float(),
+                gt_local_pts[..., :2][valid_masks].float()
+            ).mean()
+
+        final_loss += depth_loss + xy_loss
+        details['depth_loss'] = depth_loss if torch.is_tensor(depth_loss) else torch.tensor(depth_loss, device=pred_local_pts.device)
+        details['xy_loss'] = xy_loss if torch.is_tensor(xy_loss) else torch.tensor(xy_loss, device=pred_local_pts.device)
+        details['local_pts_loss'] = details['depth_loss'] + details['xy_loss']
+
+        # normal loss (still use it for high quality datasets)
+        normal_batch_id = [i for i in range(len(gt['dataset_names'])) if gt['dataset_names'][i] in __HIGH_QUALITY_DATASETS__ + __MIDDLE_QUALITY_DATASETS__]
+        if len(normal_batch_id) == 0:
+            normal_loss = 0.0 * pred_local_pts.mean()
+        else:
+            normal_loss = self.noraml_loss(pred_local_pts[normal_batch_id], gt_local_pts[normal_batch_id], valid_masks[normal_batch_id])
+            final_loss += normal_loss.mean()
+        details['normal_loss'] = normal_loss.mean()
+
+        return final_loss, details, S_opt_local
+
+
+class Pi3LossLeanMapping(nn.Module):
+    """
+    Loss variant using Lean Mapping variance-weighted depth loss:
+    - Uses GT-only normalization (normalize_gt=true, normalize_pred=false)
+    - Applies Lean Mapping (kernel-based) variance weighting on depth
+    - No scale alignment
+    """
+    def __init__(
+        self,
+        train_conf=False,
+        normalize_pred=False,
+        normalize_gt=True,
+        loss_type='weighted_l1',  # 'weighted_l1' or 'laplace_nll'
+        kernel_size=7,
+        kernel='gaussian',  # 'gaussian' or 'box'
+        gaussian_sigma=None,
+        min_valid_count=8,
+        prior_rel=0.1,
+        prior_abs=0.0,
+        std_min=0.1,
+    ):
+        super().__init__()
+        self.point_loss = PointLossLeanMapping(
+            train_conf=train_conf,
+            loss_type=loss_type,
+            kernel_size=kernel_size,
+            kernel=kernel,
+            gaussian_sigma=gaussian_sigma,
+            min_valid_count=min_valid_count,
+            prior_rel=prior_rel,
+            prior_abs=prior_abs,
+            std_min=std_min,
+        )
+        self.camera_loss = CameraLoss()
+        self.normalize_pred = normalize_pred
+        self.normalize_gt = normalize_gt
+
+    def prepare_gt(self, gt):
+        gt_pts = torch.stack([view['pts3d'] for view in gt], dim=1)
+        masks = torch.stack([view['valid_mask'] for view in gt], dim=1)
+        poses = torch.stack([view['camera_pose'] for view in gt], dim=1)
+
+        B, N, H, W, _ = gt_pts.shape
+
+        # Transform to first frame camera coordinate
+        w2c_target = se3_inverse(poses[:, 0])
+        gt_pts = torch.einsum('bij, bnhwj -> bnhwi', w2c_target, homogenize_points(gt_pts))[..., :3]
+        poses = torch.einsum('bij, bnjk -> bnik', w2c_target, poses)
+
+        # Optionally normalize GT points
+        if self.normalize_gt:
+            valid_batch = masks.sum([-1, -2, -3]) > 0
+            if valid_batch.sum() > 0:
+                B_ = valid_batch.sum()
+                all_pts = gt_pts[valid_batch].clone()
+                all_pts[~masks[valid_batch]] = 0
+                all_pts = all_pts.reshape(B_, N, -1, 3)
+                all_dis = all_pts.norm(dim=-1)
+                norm_factor = all_dis.sum(dim=[-1, -2]) / (masks[valid_batch].float().sum(dim=[-1, -2, -3]) + 1e-8)
+
+                gt_pts[valid_batch] = gt_pts[valid_batch] / norm_factor[..., None, None, None, None]
+                poses[valid_batch, ..., :3, 3] /= norm_factor[..., None, None]
+
+        extrinsics = se3_inverse(poses)
+        gt_local_pts = torch.einsum('bnij, bnhwj -> bnhwi', extrinsics, homogenize_points(gt_pts))[..., :3]
+
+        dataset_names = gt[0]['dataset']
+
+        return dict(
+            imgs=torch.stack([view['img'] for view in gt], dim=1),
+            global_points=gt_pts,
+            local_points=gt_local_pts,
+            valid_masks=masks,
+            camera_poses=poses,
+            dataset_names=dataset_names
+        )
+
+    def normalize_prediction(self, pred, gt):
+        """Normalize predicted points and camera poses"""
+        local_points = pred['local_points']
+        camera_poses = pred['camera_poses']
+        B, N, H, W, _ = local_points.shape
+        masks = gt['valid_masks']
+
+        # Normalize predict points
+        all_pts = local_points.clone()
+        all_pts[~masks] = 0
+        all_pts = all_pts.reshape(B, N, -1, 3)
+        all_dis = all_pts.norm(dim=-1)
+        norm_factor = all_dis.sum(dim=[-1, -2]) / (masks.float().sum(dim=[-1, -2, -3]) + 1e-8)
+        local_points = local_points / norm_factor[..., None, None, None, None]
+
+        if 'global_points' in pred and pred['global_points'] is not None:
+            pred['global_points'] /= norm_factor[..., None, None, None, None]
+
+        camera_poses_normalized = camera_poses.clone()
+        camera_poses_normalized[..., :3, 3] /= norm_factor.view(B, 1, 1)
+
+        pred['local_points'] = local_points
+        pred['camera_poses'] = camera_poses_normalized
+
+        return pred
+
+    def forward(self, pred, gt_raw):
+        gt = self.prepare_gt(gt_raw)
+
+        final_loss = 0.0
+        details = dict()
+
+        # Point Loss with Lean mapping variance weighting
+        point_loss, point_loss_details, scale = self.point_loss(pred, gt, gt_raw=gt_raw)
+        final_loss += point_loss
+        details.update(point_loss_details)
+
+        # Camera Loss
         camera_loss, camera_loss_details = self.camera_loss(pred, gt, scale)
         final_loss += camera_loss * 0.1
         details.update(camera_loss_details)

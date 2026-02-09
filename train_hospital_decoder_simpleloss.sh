@@ -40,6 +40,8 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
     scripts/train_pi3.py \
     train=train_pi3_lowres \
     data=${DATA_CONFIG} \
+    train_dataset.TarTanAir.data_root=/mnt/localssd/data \
+    test_dataset.TarTanAir.data_root=/mnt/localssd/data \
     model=pi3 \
     loss.train_loss._target_=pi3.models.loss_ablation.Pi3LossAblation \
     loss.test_loss._target_=pi3.models.loss_ablation.Pi3LossAblation \
@@ -83,6 +85,8 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
     scripts/train_pi3.py \
     train=train_pi3_highres \
     data=${DATA_CONFIG} \
+    train_dataset.TarTanAir.data_root=/mnt/localssd/data \
+    test_dataset.TarTanAir.data_root=/mnt/localssd/data \
     model=pi3 \
     loss.train_loss._target_=pi3.models.loss_ablation.Pi3LossAblation \
     loss.test_loss._target_=pi3.models.loss_ablation.Pi3LossAblation \

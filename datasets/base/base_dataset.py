@@ -102,7 +102,7 @@ class BaseDataset(EasyDataset):
                         setattr(self, attr_name, converted_value)
                     else:
                         print(f"[{self.dataset_label}] <{attr_name}> conversion may not be equivalent, skipping.", flush=True)
-                except ValueError as e:
+                except (ValueError, TypeError) as e:
                     print(f"[{self.dataset_label}] Error converting <{attr_name}>: {e}", flush=True)
 
     def _set_resolutions(self, resolutions):
@@ -132,6 +132,9 @@ class BaseDataset(EasyDataset):
         if not isinstance(image, PIL.Image.Image):
             image = PIL.Image.fromarray(image)
 
+        # Create depthmap_linear for variance calculation (linear interpolation)
+        depthmap_linear = depthmap.copy() if depthmap is not None else None
+
         # downscale with lanczos interpolation so that image.size == resolution
         # cropping centered on the principal point
         W, H = image.size
@@ -144,7 +147,7 @@ class BaseDataset(EasyDataset):
         l, t = cx - min_margin_x, cy - min_margin_y
         r, b = cx + min_margin_x, cy + min_margin_y
         crop_bbox = (l, t, r, b)
-        image, depthmap, intrinsics, normal, far_mask = cropping.crop_image_depthmap(image, depthmap, intrinsics, crop_bbox, normal=normal)
+        image, depthmap, intrinsics, normal, far_mask, depthmap_linear = cropping.crop_image_depthmap(image, depthmap, intrinsics, crop_bbox, normal=normal, far_mask=far_mask, depthmap_linear=depthmap_linear)
 
         # transpose the resolution if necessary
         W, H = image.size  # new size
@@ -162,18 +165,19 @@ class BaseDataset(EasyDataset):
         target_resolution = np.array(resolution)
         if self.aug_focal:
             crop_scale = self.aug_focal + (1.0 - self.aug_focal) * np.random.beta(0.5, 0.5) # beta distribution, bi-modal
-            image, depthmap, intrinsics, normal, far_mask = cropping.center_crop_image_depthmap(image, depthmap, intrinsics, crop_scale, normal=normal, far_mask=far_mask)
+            image, depthmap, intrinsics, normal, far_mask, depthmap_linear = cropping.center_crop_image_depthmap(image, depthmap, intrinsics, crop_scale, normal=normal, far_mask=far_mask, depthmap_linear=depthmap_linear)
 
         if self.aug_crop > 1:
             target_resolution += rng.integers(0, self.aug_crop)
-        image, depthmap, intrinsics, normal, far_mask = cropping.rescale_image_depthmap(image, depthmap, intrinsics, target_resolution, normal=normal, far_mask=far_mask) # slightly scale the image a bit larger than the target resolution
+        image, depthmap, intrinsics, normal, far_mask, depthmap_linear = cropping.rescale_image_depthmap(image, depthmap, intrinsics, target_resolution, normal=normal, far_mask=far_mask, depthmap_linear=depthmap_linear) # slightly scale the image a bit larger than the target resolution
 
         # actual cropping (if necessary) with bilinear interpolation
         intrinsics2 = cropping.camera_matrix_of_crop(intrinsics, image.size, resolution, offset_factor=0.5)
         crop_bbox = cropping.bbox_from_intrinsics_in_out(intrinsics, intrinsics2, resolution)
-        image, depthmap, intrinsics2, normal, far_mask = cropping.crop_image_depthmap(image, depthmap, intrinsics, crop_bbox, normal=normal, far_mask=far_mask)
+        image, depthmap, intrinsics2, normal, far_mask, depthmap_linear = cropping.crop_image_depthmap(image, depthmap, intrinsics, crop_bbox, normal=normal, far_mask=far_mask, depthmap_linear=depthmap_linear)
 
         other = [x for x in [normal, far_mask] if x is not None]
+        other.append(depthmap_linear)
         return image, depthmap, intrinsics2, *other
     
     def __getitem__(self, idx):
