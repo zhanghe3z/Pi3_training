@@ -90,13 +90,32 @@ def save_depth_comparison(rgb, depth_gt, depth_pred, save_path, variance=None):
         if isinstance(variance, torch.Tensor):
             variance = variance.detach().cpu().numpy()
 
-        # Compute variance statistics
-        var_min = variance[valid_gt].min() if valid_gt.any() else 0
-        var_max = variance[valid_gt].max() if valid_gt.any() else 1
-        var_mean = variance[valid_gt].mean() if valid_gt.any() else 0
+        # Scale std range [std_min, std_max] to [1, 6]
+        std = np.sqrt(variance + 1e-6)
 
-        im3 = axes[3].imshow(variance, cmap='plasma', vmin=var_min, vmax=var_max)
-        axes[3].set_title(f'Variance (mean={var_mean:.4f})')
+        # Get valid std values
+        valid_std = std[valid_gt] if valid_gt.any() else std
+        if valid_std.size > 0:
+            std_min_val = valid_std.min()
+            std_max_val = valid_std.max()
+
+            # Linear mapping: std_min -> 1, std_max -> 6
+            if std_max_val > std_min_val:
+                std_scaled = 1.0 + (std - std_min_val) / (std_max_val - std_min_val) * 5.0
+            else:
+                std_scaled = np.full_like(std, 3.5)
+        else:
+            std_scaled = np.full_like(std, 3.5)
+
+        weights = 1 / std_scaled
+
+        # Compute weight statistics
+        weight_min = weights[valid_gt].min() if valid_gt.any() else 1/6
+        weight_max = weights[valid_gt].max() if valid_gt.any() else 1
+        weight_mean = weights[valid_gt].mean() if valid_gt.any() else 0
+
+        im3 = axes[3].imshow(weights, cmap='plasma', vmin=1/6, vmax=1)
+        axes[3].set_title(f'Weight (mean={weight_mean:.4f})')
         axes[3].axis('off')
         plt.colorbar(im3, ax=axes[3], fraction=0.046, pad=0.04)
 
@@ -201,212 +220,6 @@ class PointLossAblation(nn.Module):
 
         return final_loss, details, S_opt_local
 
-# ---------------------------------------------------------------------------
-# ABLATION: mip-NeRF Variance-Weighted PointLoss
-# ---------------------------------------------------------------------------
-
-class PointLossMipNeRFVariance(nn.Module):
-    """
-    Ablation Study: Uses mip-NeRF inspired variance weighting for depth loss.
-
-    - Computes per-pixel depth variance from GT using local spatial variation
-      and depth-dependent prior
-    - Applies variance-weighted L1 loss on depth (Z coordinate)
-    - No scale alignment (similar to PointLossAblation)
-    """
-    def __init__(
-        self,
-        train_conf=False,
-        loss_type='weighted_l1',  # 'weighted_l1' or 'laplace_nll'
-        window=5,
-        lambda_prior=0.5,
-        alpha_clamp=0.3,
-    ):
-        super().__init__()
-        self.criteria_local = nn.L1Loss(reduction='none')
-        self.train_conf = train_conf
-        self.loss_type = loss_type
-        self.window = window
-        self.lambda_prior = lambda_prior
-        self.alpha_clamp = alpha_clamp
-
-        if self.train_conf:
-            raise NotImplementedError("Confidence training not supported in ablation loss")
-
-    def extract_intrinsics(self, gt_raw):
-        """
-        Extract intrinsics from GT data.
-        gt_raw is a list of N view dicts, each with batched tensors of shape (B, ...)
-        Returns fx, fy, cx, cy as tensors of shape (B*N,)
-        """
-        # gt_raw is [view1_dict, view2_dict, ...]
-        # Each view_dict['camera_intrinsics'] has shape (B, 3, 3)
-
-        intrinsics_list = []
-        for view in gt_raw:
-            K = view['camera_intrinsics']  # (B, 3, 3) tensor
-            intrinsics_list.append(K)
-
-        # Stack along view dimension: (N, B, 3, 3)
-        intrinsics = torch.stack(intrinsics_list, dim=0)
-
-        # Transpose to (B, N, 3, 3) then reshape to (B*N, 3, 3)
-        intrinsics = intrinsics.transpose(0, 1).reshape(-1, 3, 3)
-
-        fx = intrinsics[:, 0, 0]  # (B*N,)
-        fy = intrinsics[:, 1, 1]  # (B*N,)
-        cx = intrinsics[:, 0, 2]  # (B*N,)
-        cy = intrinsics[:, 1, 2]  # (B*N,)
-
-        return fx, fy, cx, cy
-
-    def noraml_loss(self, points, gt_points, mask):
-        not_edge = ~depth_edge(gt_points[..., 2], rtol=0.03)
-        mask = torch.logical_and(mask, not_edge)
-
-        leftup, rightup, leftdown, rightdown = points[..., :-1, :-1, :], points[..., :-1, 1:, :], points[..., 1:, :-1, :], points[..., 1:, 1:, :]
-        upxleft = torch.cross(rightup - rightdown, leftdown - rightdown, dim=-1)
-        leftxdown = torch.cross(leftup - rightup, rightdown - rightup, dim=-1)
-        downxright = torch.cross(leftdown - leftup, rightup - leftup, dim=-1)
-        rightxup = torch.cross(rightdown - leftdown, leftup - leftdown, dim=-1)
-
-        gt_leftup, gt_rightup, gt_leftdown, gt_rightdown = gt_points[..., :-1, :-1, :], gt_points[..., :-1, 1:, :], gt_points[..., 1:, :-1, :], gt_points[..., 1:, 1:, :]
-        gt_upxleft = torch.cross(gt_rightup - gt_rightdown, gt_leftdown - gt_rightdown, dim=-1)
-        gt_leftxdown = torch.cross(gt_leftup - gt_rightup, gt_rightdown - gt_rightup, dim=-1)
-        gt_downxright = torch.cross(gt_leftdown - gt_leftup, gt_rightup - gt_leftup, dim=-1)
-        gt_rightxup = torch.cross(gt_rightdown - gt_leftdown, gt_leftup - gt_leftdown, dim=-1)
-
-        mask_leftup, mask_rightup, mask_leftdown, mask_rightdown = mask[..., :-1, :-1], mask[..., :-1, 1:], mask[..., 1:, :-1], mask[..., 1:, 1:]
-        mask_upxleft = mask_rightup & mask_leftdown & mask_rightdown
-        mask_leftxdown = mask_leftup & mask_rightdown & mask_rightup
-        mask_downxright = mask_leftdown & mask_rightup & mask_leftup
-        mask_rightxup = mask_rightdown & mask_leftup & mask_leftdown
-
-        MIN_ANGLE, MAX_ANGLE, BETA_RAD = math.radians(1), math.radians(90), math.radians(3)
-
-        loss = mask_upxleft * _smooth(angle_diff_vec3(upxleft, gt_upxleft).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD) \
-                + mask_leftxdown * _smooth(angle_diff_vec3(leftxdown, gt_leftxdown).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD) \
-                + mask_downxright * _smooth(angle_diff_vec3(downxright, gt_downxright).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD) \
-                + mask_rightxup * _smooth(angle_diff_vec3(rightxup, gt_rightxup).clamp(MIN_ANGLE, MAX_ANGLE), beta=BETA_RAD)
-
-        loss = loss.mean() / (4 * max(points.shape[-3:-1]))
-
-        return loss
-
-    def forward(self, pred, gt, gt_raw=None):
-        """
-        Args:
-            pred: dict with 'local_points' (B, N, H, W, 3)
-            gt: dict with 'local_points', 'valid_masks', 'norm_factor' (optional), etc.
-            gt_raw: raw GT data with intrinsics (required for this loss)
-        """
-        if gt_raw is None:
-            raise ValueError("gt_raw is required for mip-NeRF variance loss to extract intrinsics")
-
-        pred_local_pts = pred['local_points']
-        gt_local_pts = gt['local_points']
-        valid_masks = gt['valid_masks']
-        details = dict()
-        final_loss = 0.0
-
-        B, N, H, W, _ = pred_local_pts.shape
-
-        # Extract intrinsics
-        fx, fy, cx, cy = self.extract_intrinsics(gt_raw)  # (B*N,)
-        # Compute depth variance for each view
-        # Reshape to (B*N, 1, H, W) for processing
-        gt_depth = gt_local_pts[..., 2].reshape(B*N, 1, H, W)
-
-        # Compute variance
-        sigma_Z2, sigma_t2, t_mu, t_delta = sigma_z2_from_gt_z_pixelwise(
-            gt_depth/10, fx, fy, cx, cy,
-            window=self.window,
-            lambda_prior=self.lambda_prior,
-            alpha_clamp=self.alpha_clamp
-        )
-
-        # CRITICAL FIX: Scale up variance by 1000x to prevent weight explosion
-        # When variance is too small, weights = 1/sqrt(variance) become too large
-        sigma_Z2 = sigma_Z2 * 1000.0
-
-        # Reshape back to (B, N, H, W)
-        sigma_Z2 = sigma_Z2.reshape(B, N, H, W)
-
-        # ABLATION: No scale alignment
-        S_opt_local = torch.ones(B, device=pred_local_pts.device)
-
-        # Extract predicted and GT depth
-        pred_depth = pred_local_pts[..., 2]  # (B, N, H, W)
-        gt_depth_reshaped = gt_local_pts[..., 2]  # (B, N, H, W)
-
-        # Debug: Check for issues
-        num_valid = valid_masks.sum().item()
-        if num_valid == 0:
-            print(f"[WARNING] No valid pixels! All masks are False.")
-            depth_loss = 0.0 * pred_depth.mean()
-            xy_loss = 0.0 * pred_depth.mean()
-        else:
-            # Apply variance-weighted depth loss only on valid pixels
-            if self.loss_type == 'weighted_l1':
-                # Compute weighted L1 for valid pixels
-                depth_diff = torch.abs(pred_depth - gt_depth_reshaped)  # (B, N, H, W)
-                sigma_std = torch.sqrt(sigma_Z2 + 1e-6)
-                # CRITICAL FIX: Clip sigma_std to minimum of 0.1 to prevent extremely large weights
-                sigma_std = torch.clamp(sigma_std, min=0.1)
-                weights = 0.1 / (sigma_std + 1e-6)
-                weighted_depth_loss = (weights * depth_diff)[valid_masks]
-
-                # Add statistics to details for wandb logging
-                # Keep as tensors for accelerator.gather(), will be converted to float later
-                details['sigma_Z2_min'] = sigma_Z2[valid_masks].min()
-                details['sigma_Z2_max'] = sigma_Z2[valid_masks].max()
-                details['sigma_Z2_mean'] = sigma_Z2[valid_masks].mean()
-                details['sigma_std_min'] = sigma_std[valid_masks].min()
-                details['sigma_std_max'] = sigma_std[valid_masks].max()
-                details['sigma_std_mean'] = sigma_std[valid_masks].mean()
-                details['weights_min'] = weights[valid_masks].min()
-                details['weights_max'] = weights[valid_masks].max()
-                details['weights_mean'] = weights[valid_masks].mean()
-                details['depth_diff_mean'] = depth_diff[valid_masks].mean()
-                details['depth_diff_max'] = depth_diff[valid_masks].max()
-                details['weighted_depth_loss_mean'] = weighted_depth_loss.mean()
-
-                depth_loss = weighted_depth_loss.mean()
-            elif self.loss_type == 'laplace_nll':
-                # Laplace NLL for valid pixels
-                sigma_std = torch.sqrt(sigma_Z2 + 1e-6)
-                # CRITICAL FIX: Clip sigma_std to minimum of 0.1 to prevent extremely large weights
-                sigma_std = torch.clamp(sigma_std, min=0.1)
-                # Convert to Laplace parameter b = sigma/sqrt(2)
-                b = sigma_std / torch.sqrt(torch.tensor(2.0, device=sigma_std.device, dtype=sigma_std.dtype))
-                b = b.clamp(min=1e-3)  # Extra safety
-                depth_diff = torch.abs(pred_depth - gt_depth_reshaped)
-                laplace_loss = (depth_diff / b + torch.log(b))[valid_masks]
-                depth_loss = laplace_loss.mean()
-            else:
-                raise ValueError(f"Unknown loss_type: {self.loss_type}")
-
-            # Also add XY loss (unweighted L1)
-            xy_loss = self.criteria_local(
-                pred_local_pts[..., :2][valid_masks].float(),
-                gt_local_pts[..., :2][valid_masks].float()
-            ).mean()
-
-        final_loss += depth_loss + xy_loss
-        details['depth_loss'] = depth_loss if torch.is_tensor(depth_loss) else torch.tensor(depth_loss, device=pred_local_pts.device)
-        details['xy_loss'] = xy_loss if torch.is_tensor(xy_loss) else torch.tensor(xy_loss, device=pred_local_pts.device)
-        details['local_pts_loss'] = details['depth_loss'] + details['xy_loss']
-
-        # normal loss (still use it for high quality datasets)
-        normal_batch_id = [i for i in range(len(gt['dataset_names'])) if gt['dataset_names'][i] in __HIGH_QUALITY_DATASETS__ + __MIDDLE_QUALITY_DATASETS__]
-        if len(normal_batch_id) == 0:
-            normal_loss = 0.0 * pred_local_pts.mean()
-        else:
-            normal_loss = self.noraml_loss(pred_local_pts[normal_batch_id], gt_local_pts[normal_batch_id], valid_masks[normal_batch_id])
-            final_loss += normal_loss.mean()
-        details['normal_loss'] = normal_loss.mean()
-
-        return final_loss, details, S_opt_local
 
 # ---------------------------------------------------------------------------
 # CameraLoss: Affine-invariant Camera Pose (Keep Original)
@@ -709,7 +522,7 @@ class PointLossLeanMapping(nn.Module):
         self,
         train_conf=False,
         loss_type='weighted_l1',  # 'weighted_l1' or 'laplace_nll'
-        kernel_size=7,
+        kernel_size=5,
         kernel='gaussian',  # 'gaussian' or 'box'
         gaussian_sigma=None,  # default: kernel_size/6
         min_valid_count=8,
@@ -855,8 +668,36 @@ class PointLossLeanMapping(nn.Module):
                 # Compute weighted L1 for valid pixels
                 depth_diff = torch.abs(pred_depth - gt_depth)  # (B, N, H, W)
                 std = torch.sqrt(variance + 1e-6)
-                std = torch.clamp(std, min=self.std_min)
-                weights = 0.05 / (std + 1e-6)
+
+                # Scale std range [std_min, std_max] to [1, 6] for each image
+                # Compute min/max per (B, N) image using matrix operations
+                B, N, H, W = std.shape
+                std_flat = std.reshape(B, N, -1)  # (B, N, H*W)
+                valid_flat = valid_masks.reshape(B, N, -1)  # (B, N, H*W)
+
+                # For min: set invalid to inf, then take min over spatial dimension
+                std_for_min = std_flat.clone()
+                std_for_min[~valid_flat] = float('inf')
+                std_min_vals = std_for_min.min(dim=-1).values  # (B, N)
+
+                # For max: set invalid to -inf, then take max over spatial dimension
+                std_for_max = std_flat.clone()
+                std_for_max[~valid_flat] = float('-inf')
+                std_max_vals = std_for_max.max(dim=-1).values  # (B, N)
+
+                # Reshape for broadcasting: (B, N, 1, 1)
+                std_min_vals = std_min_vals.view(B, N, 1, 1)
+                std_max_vals = std_max_vals.view(B, N, 1, 1)
+
+                # Linear mapping: std_min -> 1, std_max -> 6
+                std_range = std_max_vals - std_min_vals
+                std_scaled = torch.where(
+                    std_range > 1e-6,
+                    1.0 + (std - std_min_vals) / std_range * 9.0,
+                    torch.full_like(std, 5)  # If all same, use middle value
+                )
+
+                weights = 1 / std_scaled 
                 weighted_depth_loss = (weights * depth_diff)[valid_masks]
 
                 # Add statistics to details for wandb logging
@@ -905,7 +746,7 @@ class PointLossLeanMapping(nn.Module):
             normal_loss = 0.0 * pred_local_pts.mean()
         else:
             normal_loss = self.noraml_loss(pred_local_pts[normal_batch_id], gt_local_pts[normal_batch_id], valid_masks[normal_batch_id])
-            final_loss += normal_loss.mean()
+            final_loss += 0.0 * normal_loss.mean()
         details['normal_loss'] = normal_loss.mean()
 
         return final_loss, details, S_opt_local

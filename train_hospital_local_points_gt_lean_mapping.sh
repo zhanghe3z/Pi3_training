@@ -14,7 +14,7 @@ NUM_MACHINES=1
 DATA_CONFIG="tartanair_hospital"
 
 # Output directory
-OUTPUT_DIR="outputs/pi3_hospital_lean_mapping"
+OUTPUT_DIR="outputs/pi3_hospital_lean_mapping_v2"
 mkdir -p ${OUTPUT_DIR}
 
 echo "=========================================="
@@ -41,18 +41,6 @@ echo "Resolution: 224x224"
 echo "Epochs: 80"
 echo ""
 
-# Check if there's an existing checkpoint to resume from
-RESUME_LOWRES_CKPT=$(find outputs/pi3_hospital_lowres_lean/ckpts -name "*.pth" 2>/dev/null | sort -V | tail -n 1)
-
-if [ -z "${RESUME_LOWRES_CKPT}" ]; then
-    echo "No existing checkpoint found. Starting training from scratch."
-    CKPT_ARG=""
-else
-    echo "Found existing checkpoint: ${RESUME_LOWRES_CKPT}"
-    echo "Resuming training from checkpoint..."
-    CKPT_ARG="model.ckpt=${RESUME_LOWRES_CKPT}"
-fi
-echo ""
 
 accelerate launch --config_file configs/accelerate/ddp.yaml \
     --num_processes ${NUM_GPUS} \
@@ -64,12 +52,13 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
     test_dataset.TarTanAir.data_root=/mnt/localssd/data \
     model=pi3_local_pts_gt_pred \
     model.depth_activation=exp \
+    train.clip_grad=10.0 \
     loss.train_loss._target_=pi3.models.loss_ablation.Pi3LossLeanMapping \
     ~loss.train_loss.use_local_alignment_normalize \
     +loss.train_loss.normalize_pred=false \
     +loss.train_loss.normalize_gt=true \
     +loss.train_loss.loss_type=weighted_l1 \
-    +loss.train_loss.kernel_size=7 \
+    +loss.train_loss.kernel_size=5 \
     +loss.train_loss.kernel=gaussian \
     +loss.train_loss.min_valid_count=8 \
     +loss.train_loss.prior_rel=0.1 \
@@ -80,13 +69,13 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
     +loss.test_loss.normalize_pred=false \
     +loss.test_loss.normalize_gt=true \
     +loss.test_loss.loss_type=weighted_l1 \
-    +loss.test_loss.kernel_size=7 \
+    +loss.test_loss.kernel_size=5 \
     +loss.test_loss.kernel=gaussian \
     +loss.test_loss.min_valid_count=8 \
     +loss.test_loss.prior_rel=0.1 \
     +loss.test_loss.prior_abs=0.0 \
     +loss.test_loss.std_min=0.1 \
-    name=pi3_hospital_lowres_lean \
+    name=pi3_hospital_lean_mapping_clip_min_max \
     log.use_wandb=true \
     log.use_tensorboard=false \
     viz_interval=200 \
@@ -131,12 +120,13 @@ accelerate launch --config_file configs/accelerate/ddp.yaml \
     test_dataset.TarTanAir.data_root=/mnt/localssd/data \
     model=pi3_local_pts_gt_pred \
     model.depth_activation=exp \
+    train.clip_grad=10.0 \
     loss.train_loss._target_=pi3.models.loss_ablation.Pi3LossLeanMapping \
     ~loss.train_loss.use_local_alignment_normalize \
     +loss.train_loss.normalize_pred=false \
     +loss.train_loss.normalize_gt=true \
     +loss.train_loss.loss_type=weighted_l1 \
-    +loss.train_loss.kernel_size=7 \
+    +loss.train_loss.kernel_size=5 \
     +loss.train_loss.kernel=gaussian \
     +loss.train_loss.min_valid_count=8 \
     +loss.train_loss.prior_rel=0.1 \

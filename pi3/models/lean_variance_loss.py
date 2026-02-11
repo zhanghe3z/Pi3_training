@@ -47,7 +47,7 @@ def _make_gaussian_kernel(k: int, sigma: float, device, dtype) -> torch.Tensor:
 def lean_depth_moments_and_variance(
     depth: torch.Tensor,
     valid_mask: Optional[torch.Tensor] = None,
-    kernel_size: int = 7,
+    kernel_size: int = 3,
     kernel: Literal["box", "gaussian"] = "gaussian",
     gaussian_sigma: Optional[float] = None,
     padding_mode: Literal["reflect", "replicate", "zeros"] = "replicate",

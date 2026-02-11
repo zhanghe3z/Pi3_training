@@ -224,6 +224,150 @@ class Pi3Trainer(BaseTrainer):
         plt.tight_layout()
         return fig
 
+    def create_weight_visualization(self, variance_map, depth_gt=None, depth_pred=None, std_min=0.1):
+        """
+        Create visualization of weight map = 1/std, where std is computed from variance and clipped.
+
+        Weight computation follows the loss function:
+        - std = sqrt(variance + eps)
+        - std = clip(std, std_min, inf)
+        - weight = 1 / (std + eps)
+
+        Args:
+            variance_map: Variance map tensor (B, N, H, W) or (H, W) - computed from GT depth
+            depth_gt: Optional ground truth depth for comparison
+            depth_pred: Optional predicted depth for comparison
+            std_min: Minimum value for standard deviation (default: 0.1)
+        """
+        # Convert to numpy if needed
+        if isinstance(variance_map, torch.Tensor):
+            variance_map = variance_map.cpu().detach().numpy()
+
+        # Remove extra dimensions
+        if variance_map.ndim > 2:
+            variance_map = variance_map.squeeze()
+
+        # Compute std from variance
+        eps = 1e-6
+        std_map = np.sqrt(variance_map + eps)
+
+        # Scale std range [std_min, std_max] to [1, 6] for each image
+        std_min_val = std_map.min()
+        std_max_val = std_map.max()
+
+        # Linear mapping: std_min -> 1, std_max -> 6
+        if std_max_val > std_min_val:
+            std_scaled = 1.0 + (std_map - std_min_val) / (std_max_val - std_min_val) * 9.0
+        else:
+            # If all values are the same, map to middle value
+            std_scaled = np.full_like(std_map, 5)
+
+        # Compute weight = 1 / std
+        weight_map = 1.0 / std_scaled
+
+        # Calculate statistics
+        var_mean = variance_map.mean()
+        var_std = variance_map.std()
+        var_min = variance_map.min()
+        var_max = variance_map.max()
+
+        std_mean = std_map.mean()
+        std_std = std_map.std()
+        std_min_val = std_map.min()
+        std_max = std_map.max()
+
+        weight_mean = weight_map.mean()
+        weight_min = weight_map.min()
+        weight_max = weight_map.max()
+
+        # Create figure
+        num_plots = 1
+        if depth_gt is not None:
+            num_plots += 1
+        if depth_pred is not None:
+            num_plots += 1
+
+        fig, axes = plt.subplots(1, num_plots, figsize=(6*num_plots, 6))
+        if num_plots == 1:
+            axes = [axes]
+
+        plot_idx = 0
+
+        # Plot weight map (1/std)
+        im = axes[plot_idx].imshow(weight_map, cmap='turbo', interpolation='bilinear')
+        axes[plot_idx].set_title(
+            f'Weight Map (1/std) from GT Variance\n'
+            f'var: mean={var_mean:.3e}, range=[{var_min:.3e}, {var_max:.3e}]\n'
+            f'std: mean={std_mean:.3f}, range=[{std_min_val:.3f}, {std_max:.3f}]\n'
+            f'std clipped to [{std_min:.1f}, inf)\n'
+            f'weight: mean={weight_mean:.3f}, range=[{weight_min:.3f}, {weight_max:.3f}]'
+        )
+        axes[plot_idx].axis('off')
+        plt.colorbar(im, ax=axes[plot_idx], fraction=0.046, pad=0.04)
+        plot_idx += 1
+
+        # Plot GT Depth if provided
+        if depth_gt is not None:
+            if isinstance(depth_gt, torch.Tensor):
+                depth_gt = depth_gt.cpu().detach().numpy()
+            if depth_gt.ndim > 2:
+                depth_gt = depth_gt.squeeze()
+
+            valid_gt = depth_gt > 0
+            vmin = depth_gt[valid_gt].min() if valid_gt.any() else 0
+            vmax = depth_gt[valid_gt].max() if valid_gt.any() else 80
+
+            im_gt = axes[plot_idx].imshow(depth_gt, cmap='turbo', vmin=vmin, vmax=vmax, interpolation='bilinear')
+            axes[plot_idx].set_title('GT Depth')
+            axes[plot_idx].axis('off')
+            plt.colorbar(im_gt, ax=axes[plot_idx], fraction=0.046, pad=0.04)
+            plot_idx += 1
+
+        # Plot Predicted Depth if provided
+        if depth_pred is not None:
+            if isinstance(depth_pred, torch.Tensor):
+                depth_pred_tensor = depth_pred
+                depth_pred = depth_pred.cpu().detach().numpy()
+            else:
+                depth_pred_tensor = torch.from_numpy(depth_pred)
+
+            if depth_pred.ndim > 2:
+                depth_pred = depth_pred.squeeze()
+
+            # Interpolate if needed
+            if depth_gt is not None and depth_pred.shape != depth_gt.shape:
+                if depth_pred_tensor.ndim == 2:
+                    depth_pred_tensor = depth_pred_tensor.unsqueeze(0).unsqueeze(0)
+                elif depth_pred_tensor.ndim == 3:
+                    depth_pred_tensor = depth_pred_tensor.unsqueeze(0)
+
+                depth_pred_tensor = F.interpolate(
+                    depth_pred_tensor,
+                    size=depth_gt.shape[-2:],
+                    mode='bilinear',
+                    align_corners=False
+                )
+                depth_pred = depth_pred_tensor.squeeze().cpu().numpy()
+
+            # Align if GT is available
+            if depth_gt is not None:
+                depth_pred_aligned, scale, shift = self.align_depth_to_gt(depth_pred, depth_gt)
+                valid_gt = depth_gt > 0
+                vmin = depth_gt[valid_gt].min() if valid_gt.any() else 0
+                vmax = depth_gt[valid_gt].max() if valid_gt.any() else 80
+
+                im_pred = axes[plot_idx].imshow(depth_pred_aligned, cmap='turbo', vmin=vmin, vmax=vmax, interpolation='bilinear')
+                axes[plot_idx].set_title(f'Pred Depth (Aligned)\nscale={scale:.3f}')
+            else:
+                im_pred = axes[plot_idx].imshow(depth_pred, cmap='turbo', interpolation='bilinear')
+                axes[plot_idx].set_title('Pred Depth')
+
+            axes[plot_idx].axis('off')
+            plt.colorbar(im_pred, ax=axes[plot_idx], fraction=0.046, pad=0.04)
+
+        plt.tight_layout()
+        return fig
+
     def create_sigma_z2_visualization(self, depth_gt, variance=None, depth_pred=None, variance_name="σ²_Z", view=None, valid_mask=None):
         """
         Create visualization of depth variance.
@@ -509,8 +653,11 @@ class Pi3Trainer(BaseTrainer):
             # batch_views is a list of views
             # Visualize samples from the first view
             wandb_images = []
-            wandb_variance_images = []
+            wandb_weight_images = []
             num_views = min(self.num_viz_samples, len(batch_views))
+
+            # Get std_min from loss configuration for consistent weight computation
+            std_min = getattr(self.train_loss.point_loss if hasattr(self.train_loss, 'point_loss') else self.train_loss, 'std_min', 0.1)
 
             for view_idx in range(num_views):
                 view = batch_views[view_idx]
@@ -541,32 +688,31 @@ class Pi3Trainer(BaseTrainer):
                 wandb_images.append(wandb.Image(fig, caption=f"{mode}_view_{view_idx}_{label}"))
                 plt.close(fig)
 
-                # Compute and visualize variance using the appropriate method
+                # Compute variance from GT depth using the appropriate method
                 if use_lean_variance:
                     # Use Lean Mapping variance (kernel-based)
                     variance = self.compute_lean_variance_from_view(view, depth_linear, valid_mask)
                     variance_name = "Var_lean"
-                    caption_suffix = "lean_variance"
+                    caption_suffix = "lean_weight"
                 else:
                     # Use mip-NeRF variance (geometry-based)
                     variance = self.compute_sigma_z2_from_view(view, depth_linear)
                     variance_name = "σ²_Z"
-                    caption_suffix = "sigma_z2"
+                    caption_suffix = "mipnerf_weight"
 
+                # Visualize weight map (1/std) computed from GT variance
                 if variance is not None:
-                    fig_variance = self.create_sigma_z2_visualization(
-                        depth_gt, variance, depth_p, variance_name=variance_name
+                    fig_weight = self.create_weight_visualization(variance, depth_gt, depth_p, std_min=std_min)
+                    wandb_weight_images.append(
+                        wandb.Image(fig_weight, caption=f"{mode}_{caption_suffix}_view_{view_idx}_{label}")
                     )
-                    wandb_variance_images.append(
-                        wandb.Image(fig_variance, caption=f"{mode}_{caption_suffix}_view_{view_idx}_{label}")
-                    )
-                    plt.close(fig_variance)
+                    plt.close(fig_weight)
 
             # Log to wandb
             if len(wandb_images) > 0:
                 wandb.log({f"{mode}/depth_visualizations": wandb_images}, step=step)
-            if len(wandb_variance_images) > 0:
-                wandb.log({f"{mode}/variance_visualizations": wandb_variance_images}, step=step)
+            if len(wandb_weight_images) > 0:
+                wandb.log({f"{mode}/weight_visualizations": wandb_weight_images}, step=step)
         except Exception as e:
             self.log_info(f"Error in depth visualization: {e}")
             import traceback
